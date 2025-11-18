@@ -22,7 +22,7 @@ app.get('/health', (req, res) => {
     res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// Store active scraping sessions
+// Store active scraping sessions with results
 const scrapingSessions = new Map();
 
 // Helper function to generate grid
@@ -252,12 +252,6 @@ app.post('/api/scrape', async (req, res) => {
                             is_brand_match: (place.name || '').toLowerCase().includes(brand.brand.toLowerCase())
                         };
                         allResults.push(result);
-                        
-                        // Send each unique result immediately
-                        sendProgress({
-                            type: 'result',
-                            result: result
-                        });
                     });
 
                     await new Promise(resolve => setTimeout(resolve, 100));
@@ -276,10 +270,19 @@ app.post('/api/scrape', async (req, res) => {
         }
 
         console.log(`✅ Scraping complete! Found ${allResults.length} unique results`);
+        
+        // Store results in session
+        scrapingSessions.set(sessionId, {
+            results: allResults,
+            totalCost: totalApiCalls * (17 / 1000),
+            timestamp: Date.now()
+        });
+        
         console.log('📤 Sending complete event to client...');
 
         sendProgress({
             type: 'complete',
+            sessionId: sessionId,
             totalFound: allResults.length,
             totalCost: totalApiCalls * (17 / 1000)
         });
@@ -296,6 +299,26 @@ app.post('/api/scrape', async (req, res) => {
         });
         res.end();
     }
+});
+
+// Endpoint to fetch results by session ID
+app.get('/api/results/:sessionId', (req, res) => {
+    const { sessionId } = req.params;
+    
+    const session = scrapingSessions.get(sessionId);
+    if (!session) {
+        return res.status(404).json({ error: 'Session not found or expired' });
+    }
+    
+    res.json({
+        results: session.results,
+        totalCost: session.totalCost
+    });
+    
+    // Clean up old session after 5 minutes
+    setTimeout(() => {
+        scrapingSessions.delete(sessionId);
+    }, 5 * 60 * 1000);
 });
 
 const PORT = process.env.PORT || 3001;
