@@ -264,6 +264,9 @@ app.post('/api/scrape', async (req, res) => {
             is_brand_match: result.name.toLowerCase().includes(result.search_brand.toLowerCase())
         }));
 
+        console.log(`✅ Scraping complete! Found ${finalResults.length} results`);
+        console.log('📤 Sending complete event to client...');
+
         sendProgress({
             type: 'complete',
             results: finalResults,
@@ -271,6 +274,10 @@ app.post('/api/scrape', async (req, res) => {
             totalCost: totalApiCalls * (17 / 1000)
         });
 
+        console.log('✅ Complete event sent');
+        // Give the client time to receive the complete message before closing
+        await new Promise(resolve => setTimeout(resolve, 500));
+        console.log('🔚 Closing stream');
         res.end();
     } catch (error) {
         sendProgress({
