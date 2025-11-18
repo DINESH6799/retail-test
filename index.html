@@ -322,6 +322,10 @@
 
                 console.log('📤 Sending scraping request to backend...');
 
+                // Store results as we go instead of waiting for complete event
+                const collectedResults = [];
+                let finalCost = 0;
+
                 try {
                     const cityData = INDIAN_CITIES[selectedCity];
                     
@@ -347,11 +351,23 @@
 
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
+                    let isComplete = false;
 
                     while (true) {
                         const { value, done } = await reader.read();
                         if (done) {
                             console.log('✅ Scraping stream complete');
+                            // If we got here and marked as complete, move to results
+                            if (isComplete) {
+                                setResults(collectedResults);
+                                setProgress({
+                                    current: collectedResults.length,
+                                    total: collectedResults.length,
+                                    message: `Scraping complete! Found ${collectedResults.length} unique locations.`,
+                                    percentage: 100
+                                });
+                                setStep(6);
+                            }
                             break;
                         }
 
@@ -384,18 +400,18 @@
                                         });
                                     } else if (data.type === 'cost-update') {
                                         setActualCost(data.cost);
+                                        finalCost = data.cost;
+                                    } else if (data.type === 'result') {
+                                        // Collect individual results as they come
+                                        if (data.result) {
+                                            collectedResults.push(data.result);
+                                        }
                                     } else if (data.type === 'complete') {
-                                        console.log('🎉 Scraping complete!', data.totalFound, 'locations found');
-                                        setResults(data.results);
-                                        setActualCost(data.totalCost);
-                                        setProgress({
-                                            current: data.results.length,
-                                            total: data.results.length,
-                                            message: `Scraping complete! Found ${data.totalFound} unique locations.`,
-                                            percentage: 100
-                                        });
-                                        setStep(6);
-                                        return; // Exit successfully
+                                        console.log('🎉 Scraping complete!', data.totalFound || collectedResults.length, 'locations found');
+                                        isComplete = true;
+                                        finalCost = data.totalCost || finalCost;
+                                        setActualCost(finalCost);
+                                        // Don't set results here, wait for stream to close
                                     } else if (data.type === 'error') {
                                         console.error('❌ Scraping error:', data.message);
                                         alert(data.message);
@@ -403,7 +419,7 @@
                                         return;
                                     }
                                 } catch (parseError) {
-                                    console.warn('Failed to parse SSE data:', line, parseError);
+                                    console.warn('Failed to parse SSE data:', parseError);
                                 }
                             }
                         }
