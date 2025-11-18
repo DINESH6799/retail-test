@@ -185,6 +185,9 @@
                 setIsValidating(true);
                 setValidationError('');
 
+                console.log('🔍 Validating API key...');
+                console.log('🔗 Backend URL:', API_URL);
+
                 try {
                     const response = await fetch(`${API_URL}/api/validate-key`, {
                         method: 'POST',
@@ -194,7 +197,14 @@
                         body: JSON.stringify({ apiKey })
                     });
 
+                    console.log('📡 Response status:', response.status);
+                    
+                    if (!response.ok) {
+                        throw new Error(`Server responded with status: ${response.status}`);
+                    }
+
                     const data = await response.json();
+                    console.log('✅ Validation response:', data);
 
                     if (!data.valid) {
                         setValidationError(data.error);
@@ -205,7 +215,8 @@
                     setIsValidating(false);
                     return true;
                 } catch (error) {
-                    setValidationError('Failed to connect to server. Please try again.');
+                    console.error('❌ Validation error:', error);
+                    setValidationError(`Failed to connect to server: ${error.message}. The backend may be starting up (wait 30-60 seconds) or check your connection.`);
                     setIsValidating(false);
                     return false;
                 }
@@ -289,8 +300,15 @@
             };
 
             const startScraping = async () => {
+                console.log('🚀 Starting scraping...');
+                
                 const isValid = await validateApiKey();
-                if (!isValid) return;
+                if (!isValid) {
+                    console.log('❌ API key validation failed');
+                    return;
+                }
+
+                console.log('✅ API key validated successfully');
 
                 if (estimatedCost > 20000) {
                     alert(`Estimated cost (₹${estimatedCost.toFixed(2)}) exceeds the limit of ₹20,000. Please reduce the number of brands or select a smaller city.`);
@@ -301,6 +319,8 @@
                 setStep(5);
                 setActualCost(0);
                 setProgress({ current: 0, total: 0, message: 'Initializing...', percentage: 0 });
+
+                console.log('📤 Sending scraping request to backend...');
 
                 try {
                     const cityData = INDIAN_CITIES[selectedCity];
@@ -319,61 +339,82 @@
                         })
                     });
 
+                    console.log('📡 Scraping response received');
+
+                    if (!response.ok) {
+                        throw new Error(`Server responded with status: ${response.status}`);
+                    }
+
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
 
                     while (true) {
                         const { value, done } = await reader.read();
-                        if (done) break;
+                        if (done) {
+                            console.log('✅ Scraping stream complete');
+                            break;
+                        }
 
                         const chunk = decoder.decode(value);
                         const lines = chunk.split('\n');
 
                         for (const line of lines) {
                             if (line.startsWith('data: ')) {
-                                const data = JSON.parse(line.substring(6));
+                                try {
+                                    const data = JSON.parse(line.substring(6));
+                                    console.log('📊 Progress update:', data.type, data.percentage || '');
 
-                                if (data.type === 'start') {
-                                    setProgress({
-                                        current: 0,
-                                        total: data.total,
-                                        message: 'Starting scrape...',
-                                        percentage: 0
-                                    });
-                                } else if (data.type === 'progress') {
-                                    setProgress({
-                                        current: data.current,
-                                        total: data.total,
-                                        message: data.message,
-                                        percentage: data.percentage,
-                                        currentBrand: data.currentBrand,
-                                        brandIndex: data.brandIndex,
-                                        totalBrands: data.totalBrands,
-                                        gridPoint: data.gridPoint
-                                    });
-                                } else if (data.type === 'cost-update') {
-                                    setActualCost(data.cost);
-                                } else if (data.type === 'complete') {
-                                    setResults(data.results);
-                                    setActualCost(data.totalCost);
-                                    setProgress({
-                                        current: data.results.length,
-                                        total: data.results.length,
-                                        message: `Scraping complete! Found ${data.totalFound} unique locations.`,
-                                        percentage: 100
-                                    });
-                                    setStep(6);
-                                } else if (data.type === 'error') {
-                                    alert(data.message);
-                                    setStep(4);
+                                    if (data.type === 'start') {
+                                        setProgress({
+                                            current: 0,
+                                            total: data.total,
+                                            message: 'Starting scrape...',
+                                            percentage: 0
+                                        });
+                                    } else if (data.type === 'progress') {
+                                        setProgress({
+                                            current: data.current,
+                                            total: data.total,
+                                            message: data.message,
+                                            percentage: data.percentage,
+                                            currentBrand: data.currentBrand,
+                                            brandIndex: data.brandIndex,
+                                            totalBrands: data.totalBrands,
+                                            gridPoint: data.gridPoint
+                                        });
+                                    } else if (data.type === 'cost-update') {
+                                        setActualCost(data.cost);
+                                    } else if (data.type === 'complete') {
+                                        console.log('🎉 Scraping complete!', data.totalFound, 'locations found');
+                                        setResults(data.results);
+                                        setActualCost(data.totalCost);
+                                        setProgress({
+                                            current: data.results.length,
+                                            total: data.results.length,
+                                            message: `Scraping complete! Found ${data.totalFound} unique locations.`,
+                                            percentage: 100
+                                        });
+                                        setStep(6);
+                                        return; // Exit successfully
+                                    } else if (data.type === 'error') {
+                                        console.error('❌ Scraping error:', data.message);
+                                        alert(data.message);
+                                        setStep(4);
+                                        return;
+                                    }
+                                } catch (parseError) {
+                                    console.warn('Failed to parse SSE data:', line, parseError);
                                 }
                             }
                         }
                     }
                 } catch (error) {
-                    console.error('Scraping error:', error);
-                    alert('An error occurred during scraping. Please try again.');
-                    setStep(4);
+                    console.error('💥 Scraping error:', error);
+                    // Only show error if we haven't already moved to step 6 (completed)
+                    if (step !== 6) {
+                        alert(`An error occurred during scraping: ${error.message}. Please try again.`);
+                        setStep(4);
+                    }
                 } finally {
                     setIsScraping(false);
                 }
