@@ -163,6 +163,7 @@ app.post('/api/scrape', async (req, res) => {
         let currentOperation = 0;
         let totalApiCalls = 0;
         const allResults = [];
+        const seenPlaceIds = new Set(); // Track seen place IDs for deduplication
 
         sendProgress({
             type: 'start',
@@ -228,7 +229,15 @@ app.post('/api/scrape', async (req, res) => {
                     }
 
                     places.forEach(place => {
-                        allResults.push({
+                        const placeId = place.place_id;
+                        
+                        // Skip if we've already seen this place
+                        if (!placeId || seenPlaceIds.has(placeId)) {
+                            return;
+                        }
+                        seenPlaceIds.add(placeId);
+                        
+                        const result = {
                             search_brand: brand.brand,
                             search_sku: brand.sku,
                             search_category: brand.category,
@@ -238,8 +247,16 @@ app.post('/api/scrape', async (req, res) => {
                             latitude: place.geometry?.location?.lat || '',
                             longitude: place.geometry?.location?.lng || '',
                             business_status: place.business_status || '',
-                            gmaps_url: `https://www.google.com/maps/place/?q=place_id=${place.place_id}`,
-                            place_id: place.place_id
+                            gmaps_url: `https://www.google.com/maps/place/?q=place_id=${placeId}`,
+                            place_id: placeId,
+                            is_brand_match: (place.name || '').toLowerCase().includes(brand.brand.toLowerCase())
+                        };
+                        allResults.push(result);
+                        
+                        // Send each unique result immediately
+                        sendProgress({
+                            type: 'result',
+                            result: result
                         });
                     });
 
@@ -258,19 +275,12 @@ app.post('/api/scrape', async (req, res) => {
             }
         }
 
-        const deduplicated = deduplicatePlaces(allResults);
-        const finalResults = deduplicated.map(result => ({
-            ...result,
-            is_brand_match: result.name.toLowerCase().includes(result.search_brand.toLowerCase())
-        }));
-
-        console.log(`✅ Scraping complete! Found ${finalResults.length} results`);
+        console.log(`✅ Scraping complete! Found ${allResults.length} unique results`);
         console.log('📤 Sending complete event to client...');
 
         sendProgress({
             type: 'complete',
-            results: finalResults,
-            totalFound: finalResults.length,
+            totalFound: allResults.length,
             totalCost: totalApiCalls * (17 / 1000)
         });
 
