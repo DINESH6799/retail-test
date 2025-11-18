@@ -322,9 +322,8 @@
 
                 console.log('📤 Sending scraping request to backend...');
 
-                // Store results as we go instead of waiting for complete event
-                const collectedResults = [];
                 let finalCost = 0;
+                let isComplete = false;
 
                 try {
                     const cityData = INDIAN_CITIES[selectedCity];
@@ -357,17 +356,6 @@
                         const { value, done } = await reader.read();
                         if (done) {
                             console.log('✅ Scraping stream complete');
-                            // If we got here and marked as complete, move to results
-                            if (isComplete) {
-                                setResults(collectedResults);
-                                setProgress({
-                                    current: collectedResults.length,
-                                    total: collectedResults.length,
-                                    message: `Scraping complete! Found ${collectedResults.length} unique locations.`,
-                                    percentage: 100
-                                });
-                                setStep(6);
-                            }
                             break;
                         }
 
@@ -401,17 +389,33 @@
                                     } else if (data.type === 'cost-update') {
                                         setActualCost(data.cost);
                                         finalCost = data.cost;
-                                    } else if (data.type === 'result') {
-                                        // Collect individual results as they come
-                                        if (data.result) {
-                                            collectedResults.push(data.result);
-                                        }
                                     } else if (data.type === 'complete') {
-                                        console.log('🎉 Scraping complete!', data.totalFound || collectedResults.length, 'locations found');
+                                        console.log('🎉 Scraping complete!', data.totalFound, 'locations found');
                                         isComplete = true;
                                         finalCost = data.totalCost || finalCost;
                                         setActualCost(finalCost);
-                                        // Don't set results here, wait for stream to close
+                                        
+                                        // Fetch results from server
+                                        console.log('📥 Fetching results from server...');
+                                        try {
+                                            const resultsResponse = await fetch(`${API_URL}/api/results/${data.sessionId}`);
+                                            const resultsData = await resultsResponse.json();
+                                            
+                                            if (resultsData.results) {
+                                                setResults(resultsData.results);
+                                                setProgress({
+                                                    current: resultsData.results.length,
+                                                    total: resultsData.results.length,
+                                                    message: `Scraping complete! Found ${resultsData.results.length} unique locations.`,
+                                                    percentage: 100
+                                                });
+                                                setStep(6);
+                                            }
+                                        } catch (fetchError) {
+                                            console.error('Error fetching results:', fetchError);
+                                            alert('Scraping completed but failed to fetch results. Please try again.');
+                                            setStep(4);
+                                        }
                                     } else if (data.type === 'error') {
                                         console.error('❌ Scraping error:', data.message);
                                         alert(data.message);
