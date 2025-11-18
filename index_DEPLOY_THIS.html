@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Retail Brands Scraper for Expansion</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // Backend API URL - change this to your deployed backend URL
+        const API_URL = 'https://retail-scraper-api.onrender.com';
+
+        // Indian cities with their boundaries for grid-based scraping
+        const INDIAN_CITIES = {
+            "Delhi NCR": {
+                center: [28.6139, 77.2090],
+                bounds: { min_lat: 28.30, max_lat: 28.85, min_lng: 76.85, max_lng: 77.55 }
+            },
+            "Mumbai": {
+                center: [19.0760, 72.8777],
+                bounds: { min_lat: 18.89, max_lat: 19.27, min_lng: 72.77, max_lng: 73.00 }
+            },
+            "Bangalore": {
+                center: [12.9716, 77.5946],
+                bounds: { min_lat: 12.83, max_lat: 13.14, min_lng: 77.46, max_lng: 77.78 }
+            },
+            "Hyderabad": {
+                center: [17.3850, 78.4867],
+                bounds: { min_lat: 17.22, max_lat: 17.56, min_lng: 78.36, max_lng: 78.65 }
+            },
+            "Chennai": {
+                center: [13.0827, 80.2707],
+                bounds: { min_lat: 12.91, max_lat: 13.23, min_lng: 80.12, max_lng: 80.42 }
+            },
+            "Kolkata": {
+                center: [22.5726, 88.3639],
+                bounds: { min_lat: 22.40, max_lat: 22.72, min_lng: 88.24, max_lng: 88.48 }
+            },
+            "Pune": {
+                center: [18.5204, 73.8567],
+                bounds: { min_lat: 18.41, max_lat: 18.64, min_lng: 73.74, max_lng: 73.99 }
+            },
+            "Ahmedabad": {
+                center: [23.0225, 72.5714],
+                bounds: { min_lat: 22.90, max_lat: 23.13, min_lng: 72.46, max_lng: 72.70 }
+            },
+            "Jaipur": {
+                center: [26.9124, 75.7873],
+                bounds: { min_lat: 26.78, max_lat: 27.03, min_lng: 75.65, max_lng: 75.91 }
+            },
+            "Surat": {
+                center: [21.1702, 72.8311],
+                bounds: { min_lat: 21.05, max_lat: 21.28, min_lng: 72.72, max_lng: 72.94 }
+            },
+            "Lucknow": {
+                center: [26.8467, 80.9462],
+                bounds: { min_lat: 26.73, max_lat: 26.96, min_lng: 80.83, max_lng: 81.06 }
+            },
+            "Kanpur": {
+                center: [26.4499, 80.3319],
+                bounds: { min_lat: 26.34, max_lat: 26.55, min_lng: 80.22, max_lng: 80.44 }
+            },
+            "Nagpur": {
+                center: [21.1458, 79.0882],
+                bounds: { min_lat: 21.03, max_lat: 21.25, min_lng: 78.97, max_lng: 79.20 }
+            },
+            "Indore": {
+                center: [22.7196, 75.8577],
+                bounds: { min_lat: 22.61, max_lat: 22.82, min_lng: 75.75, max_lng: 75.96 }
+            },
+            "Thane": {
+                center: [19.2183, 72.9781],
+                bounds: { min_lat: 19.10, max_lat: 19.32, min_lng: 72.86, max_lng: 73.09 }
+            },
+            "Bhopal": {
+                center: [23.2599, 77.4126],
+                bounds: { min_lat: 23.15, max_lat: 23.36, min_lng: 77.30, max_lng: 77.52 }
+            },
+            "Visakhapatnam": {
+                center: [17.6868, 83.2185],
+                bounds: { min_lat: 17.58, max_lat: 17.79, min_lng: 83.11, max_lng: 83.32 }
+            },
+            "Vadodara": {
+                center: [22.3072, 73.1812],
+                bounds: { min_lat: 22.20, max_lat: 22.41, min_lng: 73.07, max_lng: 73.29 }
+            },
+            "Coimbatore": {
+                center: [11.0168, 76.9558],
+                bounds: { min_lat: 10.91, max_lat: 11.12, min_lng: 76.85, max_lng: 77.06 }
+            },
+            "Kochi": {
+                center: [9.9312, 76.2673],
+                bounds: { min_lat: 9.83, max_lat: 10.03, min_lng: 76.17, max_lng: 76.37 }
+            }
+        };
+
+        function App() {
+            const [step, setStep] = useState(1);
+            const [brandsFile, setBrandsFile] = useState(null);
+            const [brands, setBrands] = useState([]);
+            const [selectedCity, setSelectedCity] = useState('');
+            const [citySearch, setCitySearch] = useState('');
+            const [apiKey, setApiKey] = useState('');
+            const [isValidating, setIsValidating] = useState(false);
+            const [validationError, setValidationError] = useState('');
+            const [isScraping, setIsScraping] = useState(false);
+            const [progress, setProgress] = useState({ current: 0, total: 0, message: '' });
+            const [results, setResults] = useState([]);
+            const [estimatedCost, setEstimatedCost] = useState(0);
+            const [actualCost, setActualCost] = useState(0);
+            const fileInputRef = useRef(null);
+
+            const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
+                city.toLowerCase().includes(citySearch.toLowerCase())
+            );
+
+            const handleFileUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const text = event.target.result;
+                    const lines = text.split('\n').filter(line => line.trim());
+                    const headers = lines[0].split(',').map(h => h.trim());
+                    
+                    const parsedBrands = lines.slice(1).map(line => {
+                        const values = line.split(',').map(v => v.trim());
+                        return {
+                            brand: values[0] || '',
+                            sku: values[1] || '',
+                            category: values[2] || ''
+                        };
+                    }).filter(b => b.brand);
+
+                    setBrands(parsedBrands);
+                    setBrandsFile(file);
+                };
+                reader.readAsText(file);
+            };
+
+            const calculateEstimatedCost = () => {
+                if (!selectedCity || brands.length === 0) return;
+
+                const cityData = INDIAN_CITIES[selectedCity];
+                const bounds = cityData.bounds;
+                
+                // Calculate grid points
+                const gridSpacing = 5; // km
+                const latDegPerKm = 1 / 110.574;
+                const lngDegPerKm = 1 / (111.320 * Math.cos(cityData.center[0] * Math.PI / 180));
+                
+                const latStep = gridSpacing * latDegPerKm;
+                const lngStep = gridSpacing * lngDegPerKm;
+                
+                const latPoints = Math.ceil((bounds.max_lat - bounds.min_lat) / latStep) + 1;
+                const lngPoints = Math.ceil((bounds.max_lng - bounds.min_lng) / lngStep) + 1;
+                const totalGridPoints = latPoints * lngPoints;
+                
+                // Estimate API calls
+                const estimatedCalls = brands.length * totalGridPoints;
+                // Places API Nearby Search: ₹17 per 1000 calls
+                const costPerCall = 17 / 1000;
+                const estimated = estimatedCalls * costPerCall;
+                
+                setEstimatedCost(estimated);
+            };
+
+            useEffect(() => {
+                if (selectedCity && brands.length > 0) {
+                    calculateEstimatedCost();
+                }
+            }, [selectedCity, brands]);
+
+            const validateApiKey = async () => {
+                setIsValidating(true);
+                setValidationError('');
+
+                try {
+                    const response = await fetch(`${API_URL}/api/validate-key`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ apiKey })
+                    });
+
+                    const data = await response.json();
+
+                    if (!data.valid) {
+                        setValidationError(data.error);
+                        setIsValidating(false);
+                        return false;
+                    }
+
+                    setIsValidating(false);
+                    return true;
+                } catch (error) {
+                    setValidationError('Failed to connect to server. Please try again.');
+                    setIsValidating(false);
+                    return false;
+                }
+            };
+
+            const generateGrid = (bounds, spacingKm, centerLat) => {
+                const latDegPerKm = 1 / 110.574;
+                const lngDegPerKm = 1 / (111.320 * Math.cos(centerLat * Math.PI / 180));
+                
+                const latStep = spacingKm * latDegPerKm;
+                const lngStep = spacingKm * lngDegPerKm;
+                
+                const grid = [];
+                let lat = bounds.min_lat;
+                while (lat <= bounds.max_lat) {
+                    let lng = bounds.min_lng;
+                    while (lng <= bounds.max_lng) {
+                        grid.push({ lat, lng });
+                        lng += lngStep;
+                    }
+                    lat += latStep;
+                }
+                return grid;
+            };
+
+            const fetchPlaces = async (lat, lng, keyword, radius = 5000) => {
+                const places = [];
+                let nextPageToken = null;
+                let apiCalls = 0;
+
+                do {
+                    const params = new URLSearchParams({
+                        key: apiKey,
+                        location: `${lat},${lng}`,
+                        radius: radius,
+                        keyword: keyword
+                    });
+
+                    if (nextPageToken) {
+                        params.append('pagetoken', nextPageToken);
+                    }
+
+                    const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params}`;
+                    
+                    try {
+                        const response = await fetch(url);
+                        const data = await response.json();
+                        apiCalls++;
+
+                        if (data.status === 'OK' || data.status === 'ZERO_RESULTS') {
+                            places.push(...(data.results || []));
+                            nextPageToken = data.next_page_token || null;
+                            
+                            if (nextPageToken) {
+                                await new Promise(resolve => setTimeout(resolve, 2000));
+                            }
+                        } else if (data.status === 'OVER_QUERY_LIMIT') {
+                            throw new Error('API quota exceeded. Stopping scrape.');
+                        } else {
+                            nextPageToken = null;
+                        }
+                    } catch (error) {
+                        console.error('Error fetching places:', error);
+                        throw error;
+                    }
+                } while (nextPageToken);
+
+                return { places, apiCalls };
+            };
+
+            const deduplicatePlaces = (places) => {
+                const seen = new Set();
+                return places.filter(place => {
+                    const placeId = place.place_id;
+                    if (placeId && !seen.has(placeId)) {
+                        seen.add(placeId);
+                        return true;
+                    }
+                    return false;
+                });
+            };
+
+            const startScraping = async () => {
+                const isValid = await validateApiKey();
+                if (!isValid) return;
+
+                if (estimatedCost > 20000) {
+                    alert(`Estimated cost (₹${estimatedCost.toFixed(2)}) exceeds the limit of ₹20,000. Please reduce the number of brands or select a smaller city.`);
+                    return;
+                }
+
+                setIsScraping(true);
+                setStep(5);
+                setActualCost(0);
+                setProgress({ current: 0, total: 0, message: 'Initializing...', percentage: 0 });
+
+                try {
+                    const cityData = INDIAN_CITIES[selectedCity];
+                    
+                    const response = await fetch(`${API_URL}/api/scrape`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            brands: brands,
+                            cityBounds: cityData.bounds,
+                            cityCenter: cityData.center,
+                            apiKey: apiKey,
+                            sessionId: Date.now().toString()
+                        })
+                    });
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+
+                        const chunk = decoder.decode(value);
+                        const lines = chunk.split('\n');
+
+                        for (const line of lines) {
+                            if (line.startsWith('data: ')) {
+                                const data = JSON.parse(line.substring(6));
+
+                                if (data.type === 'start') {
+                                    setProgress({
+                                        current: 0,
+                                        total: data.total,
+                                        message: 'Starting scrape...',
+                                        percentage: 0
+                                    });
+                                } else if (data.type === 'progress') {
+                                    setProgress({
+                                        current: data.current,
+                                        total: data.total,
+                                        message: data.message,
+                                        percentage: data.percentage,
+                                        currentBrand: data.currentBrand,
+                                        brandIndex: data.brandIndex,
+                                        totalBrands: data.totalBrands,
+                                        gridPoint: data.gridPoint
+                                    });
+                                } else if (data.type === 'cost-update') {
+                                    setActualCost(data.cost);
+                                } else if (data.type === 'complete') {
+                                    setResults(data.results);
+                                    setActualCost(data.totalCost);
+                                    setProgress({
+                                        current: data.results.length,
+                                        total: data.results.length,
+                                        message: `Scraping complete! Found ${data.totalFound} unique locations.`,
+                                        percentage: 100
+                                    });
+                                    setStep(6);
+                                } else if (data.type === 'error') {
+                                    alert(data.message);
+                                    setStep(4);
+                                }
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.error('Scraping error:', error);
+                    alert('An error occurred during scraping. Please try again.');
+                    setStep(4);
+                } finally {
+                    setIsScraping(false);
+                }
+            };
+
+            const downloadResults = () => {
+                const headers = ['brand', 'sku', 'category', 'gmaps_category', 'name', 'address', 'latitude', 'longitude', 'business_status', 'gmaps_url', 'is_brand_match'];
+                const csvContent = [
+                    headers.join(','),
+                    ...results.map(row => [
+                        row.search_brand,
+                        row.search_sku,
+                        row.search_category,
+                        row.gmaps_category,
+                        `"${row.name.replace(/"/g, '""')}"`,
+                        `"${row.address.replace(/"/g, '""')}"`,
+                        row.latitude,
+                        row.longitude,
+                        row.business_status,
+                        row.gmaps_url,
+                        row.is_brand_match
+                    ].join(','))
+                ].join('\n');
+
+                const blob = new Blob([csvContent], { type: 'text/csv' });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${selectedCity.replace(/\s+/g, '_')}_brand_results_${new Date().toISOString().split('T')[0]}.csv`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+            };
+
+            const resetApp = () => {
+                setStep(1);
+                setBrandsFile(null);
+                setBrands([]);
+                setSelectedCity('');
+                setCitySearch('');
+                setApiKey('');
+                setValidationError('');
+                setResults([]);
+                setEstimatedCost(0);
+                setActualCost(0);
+                setProgress({ current: 0, total: 0, message: '' });
+                if (fileInputRef.current) {
+                    fileInputRef.current.value = '';
+                }
+            };
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-8 px-4">
+                    <div className="max-w-4xl mx-auto">
+                        {/* Header */}
+                        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+                            <h1 className="text-3xl font-bold text-gray-800 text-center mb-2">
+                                <i className="fas fa-store mr-3 text-indigo-600"></i>
+                                Retail Brands Scraper for Expansion
+                            </h1>
+                            <p className="text-center text-gray-600">
+                                Discover brand locations across Indian cities using Google Maps API
+                            </p>
+                        </div>
+
+                        {/* Progress Steps */}
+                        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+                            <div className="flex items-center justify-between">
+                                {[
+                                    { num: 1, label: 'Upload Brands', icon: 'fa-upload' },
+                                    { num: 2, label: 'Select City', icon: 'fa-map-marker-alt' },
+                                    { num: 3, label: 'API Key', icon: 'fa-key' },
+                                    { num: 4, label: 'Review', icon: 'fa-check-circle' },
+                                    { num: 5, label: 'Scraping', icon: 'fa-spinner' },
+                                    { num: 6, label: 'Download', icon: 'fa-download' }
+                                ].map((s, idx) => (
+                                    <div key={s.num} className="flex items-center">
+                                        <div className={`flex flex-col items-center ${step >= s.num ? 'text-indigo-600' : 'text-gray-400'}`}>
+                                            <div className={`w-10 h-10 rounded-full flex items-center justify-center ${step >= s.num ? 'bg-indigo-600 text-white' : 'bg-gray-300 text-gray-600'}`}>
+                                                <i className={`fas ${s.icon}`}></i>
+                                            </div>
+                                            <span className="text-xs mt-1 hidden sm:block">{s.label}</span>
+                                        </div>
+                                        {idx < 5 && (
+                                            <div className={`w-8 h-1 mx-2 ${step > s.num ? 'bg-indigo-600' : 'bg-gray-300'}`}></div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Main Content */}
+                        <div className="bg-white rounded-lg shadow-lg p-8">
+                            {/* Step 1: Upload Brands */}
+                            {step === 1 && (
+                                <div className="space-y-6">
+                                    <h2 className="text-2xl font-semibold text-gray-800 mb-4">
+                                        Step 1: Upload Brands CSV
+                                    </h2>
+                                    <p className="text-gray-600 mb-4">
+                                        Upload a CSV file with columns: <code className="bg-gray-100 px-2 py-1 rounded">brand</code>, <code className="bg-gray-100 px-2 py-1 rounded">sku</code>, <code className="bg-gray-100 px-2 py-1 rounded">category</code>
+                                    </p>
+                                    
+                                    <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-indigo-500 transition-colors">
+                                        <input
+                                            ref={fileInputRef}
+                                            type="file"
+                                            accept=".csv"
+                                            onChange={handleFileUpload}
+                                            className="hidden"
+                                            id="file-upload"
+                                        />
+                                        <label htmlFor="file-upload" className="cursor-pointer">
+                                            <i className="fas fa-cloud-upload-alt text-5xl text-gray-400 mb-4"></i>
+                                            <p className="text-lg text-gray-600">Click to upload or drag and drop</p>
+                                            <p className="text-sm text-gray-400 mt-2">CSV files only</p>
+                                        </label>
+                                    </div>
+
+                                    {brandsFile && (
+                                        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                                            <p className="text-green-800 font-medium">
+                                                <i className="fas fa-check-circle mr-2"></i>
+                                                {brandsFile.name} uploaded successfully
+                                            </p>
+                                            <p className="text-green-600 text-sm mt-1">
+                                                {brands.length} brands loaded
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    {brands.length > 0 && (
+                                        <div className="flex justify-end">
+                                            <button
+                                                onClick={() => setStep(2)}
+                                                className="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 transition-colors"
+                                            >
+                                                Next: Select City <i className="fas fa-arrow-right ml-2"></i>
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Step 2: Select City */}
+                            {step === 2 && (
+                                <div className="space-y-6">
+                                    <h2 className="text-2xl font-semibold text-gray-800 mb-4">
+                                        Step 2: Select City
+                                    </h2>
+                                    <p className="text-gray-600 mb-4">
+                                        Choose the Indian city where you want to scrape brand locations
+                                    </p>
+
+                                    <div className="relative">
+                                        <input
+                                            type="text"
+                                            placeholder="Search for a city..."
+                                            value={citySearch}
+                                            onChange={(e) => setCitySearch(e.target.value)}
+                                            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                        />
+                                        <i className="fas fa-search absolute right-4 top-4 text-gray-400"></i>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-96 overflow-y-auto">
+                                        {filteredCities.map(city => (
+                                            <button
+                                                key={city}
+                                                onClick={() => setSelectedCity(city)}
+                                                className={`p-4 rounded-lg border-2 transition-all ${
+                                                    selectedCity === city
+                                                        ? 'border-indigo-600 bg-indigo-50 text-indigo-700'
+                                                        : 'border-gray-200 hover:border-indigo-300'
+                                                }`}
+                                            >
+                                                <i className="fas fa-map-marker-alt mr-2"></i>
+                                                {city}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    {selectedCity && (
+                                        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                                            <p className="text-blue-800 font-medium">
+                                                <i className="fas fa-info-circle mr-2"></i>
+                                                Selected: {selectedCity}
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    <div className="flex justify-between">
+                                        <button
+                                            onClick={() => setStep(1)}
+                                            className="bg-gray-200 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-300 transition-colors"
+                                        >
+                                            <i className="fas fa-arrow-left mr-2"></i> Back
+                                        </button>
+                                        {selectedCity && (
+                                            <button
+                                                onClick={() => setStep(3)}
+                                                className="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 transition-colors"
+                                            >
+                                                Next: API Key <i className="fas fa-arrow-right ml-2"></i>
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Step 3: API Key */}
+                            {step === 3 && (
+                                <div className="space-y-6">
+                                    <h2 className="text-2xl font-semibold text-gray-800 mb-4">
+                                        Step 3: Enter Google Maps API Key
+                                    </h2>
+                                    <p className="text-gray-600 mb-4">
+                                        Enter your Google Maps API key. Make sure the Places API is enabled.
+                                    </p>
+
+                                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
+                                        <p className="text-yellow-800 text-sm">
+                                            <i className="fas fa-exclamation-triangle mr-2"></i>
+                                            <strong>Required APIs:</strong> Places API (Nearby Search)
+                                        </p>
+                                    </div>
+
+                                    <input
+                                        type="password"
+                                        placeholder="Enter your API key"
+                                        value={apiKey}
+                                        onChange={(e) => setApiKey(e.target.value)}
+                                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                    />
+
+                                    {validationError && (
+                                        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                                            <p className="text-red-800 text-sm">
+                                                <i className="fas fa-exclamation-circle mr-2"></i>
+                                                {validationError}
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    <div className="flex justify-between">
+                                        <button
+                                            onClick={() => setStep(2)}
+                                            className="bg-gray-200 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-300 transition-colors"
+                                        >
+                                            <i className="fas fa-arrow-left mr-2"></i> Back
+                                        </button>
+                                        {apiKey && (
+                                            <button
+                                                onClick={() => setStep(4)}
+                                                className="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 transition-colors"
+                                            >
+                                                Next: Review <i className="fas fa-arrow-right ml-2"></i>
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Step 4: Review */}
+                            {step === 4 && (
+                                <div className="space-y-6">
+                                    <h2 className="text-2xl font-semibold text-gray-800 mb-4">
+                                        Step 4: Review & Start Scraping
+                                    </h2>
+
+                                    <div className="bg-gray-50 rounded-lg p-6 space-y-4">
+                                        <div className="flex justify-between border-b pb-3">
+                                            <span className="text-gray-600">Brands to scrape:</span>
+                                            <span className="font-semibold">{brands.length}</span>
+                                        </div>
+                                        <div className="flex justify-between border-b pb-3">
+                                            <span className="text-gray-600">City:</span>
+                                            <span className="font-semibold">{selectedCity}</span>
+                                        </div>
+                                        <div className="flex justify-between border-b pb-3">
+                                            <span className="text-gray-600">Estimated Cost:</span>
+                                            <span className="font-semibold text-indigo-600">₹{estimatedCost.toFixed(2)}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <span className="text-gray-600">Cost Limit:</span>
+                                            <span className="font-semibold">₹20,000</span>
+                                        </div>
+                                    </div>
+
+                                    {estimatedCost > 20000 && (
+                                        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                                            <p className="text-red-800 font-medium">
+                                                <i className="fas fa-exclamation-circle mr-2"></i>
+                                                Warning: Estimated cost exceeds the ₹20,000 limit!
+                                            </p>
+                                            <p className="text-red-600 text-sm mt-1">
+                                                Please reduce the number of brands or select a smaller city.
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                                        <p className="text-blue-800 text-sm">
+                                            <i className="fas fa-info-circle mr-2"></i>
+                                            The scraping will automatically stop if the cost reaches ₹20,000.
+                                        </p>
+                                    </div>
+
+                                    <div className="flex justify-between">
+                                        <button
+                                            onClick={() => setStep(3)}
+                                            className="bg-gray-200 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-300 transition-colors"
+                                        >
+                                            <i className="fas fa-arrow-left mr-2"></i> Back
+                                        </button>
+                                        <button
+                                            onClick={startScraping}
+                                            disabled={isValidating || isScraping}
+                                            className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+                                        >
+                                            {isValidating ? (
+                                                <>
+                                                    <i className="fas fa-spinner fa-spin mr-2"></i> Validating...
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <i className="fas fa-play mr-2"></i> Start Scraping
+                                                </>
+                                            )}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Step 5: Scraping Progress */}
+                            {step === 5 && (
+                                <div className="space-y-6">
+                                    <h2 className="text-2xl font-semibold text-gray-800 mb-4 text-center">
+                                        Scraping in Progress...
+                                    </h2>
+
+                                    <div className="flex justify-center mb-6">
+                                        <i className="fas fa-spinner fa-spin text-6xl text-indigo-600"></i>
+                                    </div>
+
+                                    <div className="bg-gray-50 rounded-lg p-6">
+                                        {/* Brand Progress */}
+                                        {progress.currentBrand && (
+                                            <div className="mb-4 pb-4 border-b">
+                                                <div className="flex justify-between text-sm text-gray-600 mb-2">
+                                                    <span className="font-semibold">Current Brand:</span>
+                                                    <span className="text-indigo-600">{progress.currentBrand}</span>
+                                                </div>
+                                                <div className="flex justify-between text-sm text-gray-600">
+                                                    <span>Brand Progress:</span>
+                                                    <span>{progress.brandIndex} of {progress.totalBrands}</span>
+                                                </div>
+                                                {progress.gridPoint && (
+                                                    <div className="flex justify-between text-sm text-gray-600 mt-1">
+                                                        <span>Grid Point:</span>
+                                                        <span>{progress.gridPoint}</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Overall Progress */}
+                                        <div className="mb-4">
+                                            <div className="flex justify-between text-sm text-gray-600 mb-2">
+                                                <span>{progress.message}</span>
+                                                <span className="font-bold text-indigo-600">{progress.percentage || 0}%</span>
+                                            </div>
+                                            <div className="w-full bg-gray-200 rounded-full h-4">
+                                                <div
+                                                    className="bg-gradient-to-r from-indigo-500 to-indigo-600 h-4 rounded-full transition-all duration-300 flex items-center justify-center"
+                                                    style={{ width: `${progress.percentage || 0}%` }}
+                                                >
+                                                    {progress.percentage > 10 && (
+                                                        <span className="text-xs font-semibold text-white">
+                                                            {progress.percentage}%
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <p className="text-center text-xs text-gray-500 mt-2">
+                                                {progress.current} / {progress.total} operations complete
+                                            </p>
+                                        </div>
+
+                                        <div className="flex justify-between border-t pt-4">
+                                            <span className="text-gray-600">Current Cost:</span>
+                                            <span className="font-semibold text-indigo-600">₹{actualCost.toFixed(2)}</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                                        <p className="text-yellow-800 text-sm">
+                                            <i className="fas fa-clock mr-2"></i>
+                                            Please don't close this window. Scraping may take several minutes depending on the number of brands.
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Step 6: Download Results */}
+                            {step === 6 && (
+                                <div className="space-y-6">
+                                    <div className="text-center">
+                                        <i className="fas fa-check-circle text-6xl text-green-500 mb-4"></i>
+                                        <h2 className="text-2xl font-semibold text-gray-800 mb-2">
+                                            Scraping Complete!
+                                        </h2>
+                                        <p className="text-gray-600">
+                                            Your results are ready to download
+                                        </p>
+                                    </div>
+
+                                    <div className="bg-gray-50 rounded-lg p-6 space-y-4">
+                                        <div className="flex justify-between border-b pb-3">
+                                            <span className="text-gray-600">Total Locations Found:</span>
+                                            <span className="font-semibold text-green-600">{results.length}</span>
+                                        </div>
+                                        <div className="flex justify-between border-b pb-3">
+                                            <span className="text-gray-600">City:</span>
+                                            <span className="font-semibold">{selectedCity}</span>
+                                        </div>
+                                        <div className="flex justify-between border-b pb-3">
+                                            <span className="text-gray-600">Brands Scraped:</span>
+                                            <span className="font-semibold">{brands.length}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <span className="text-gray-600">Total Cost:</span>
+                                            <span className="font-semibold text-indigo-600">₹{actualCost.toFixed(2)}</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex flex-col space-y-3">
+                                        <button
+                                            onClick={downloadResults}
+                                            className="w-full bg-green-600 text-white px-6 py-4 rounded-lg hover:bg-green-700 transition-colors text-lg font-semibold"
+                                        >
+                                            <i className="fas fa-download mr-2"></i> Download Results CSV
+                                        </button>
+                                        <button
+                                            onClick={resetApp}
+                                            className="w-full bg-gray-200 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-300 transition-colors"
+                                        >
+                                            <i className="fas fa-redo mr-2"></i> Start New Scraping
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Footer */}
+                        <div className="text-center mt-6 text-gray-600 text-sm">
+                            <p>© 2024 Retail Brands Scraper for Expansion | Powered by Google Maps API</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
