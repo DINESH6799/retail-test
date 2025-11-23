@@ -46,47 +46,82 @@ function generateGrid(bounds, spacingKm, centerLat) {
     return grid;
 }
 
-// Fetch places from Google Maps API
-async function fetchPlaces(lat, lng, keyword, radius, apiKey) {
+// Fetch places from Google Maps API with retry logic
+async function fetchPlaces(lat, lng, keyword, radius, apiKey, retries = 3) {
     const places = [];
     let nextPageToken = null;
     let apiCalls = 0;
 
     do {
-        try {
-            const params = {
-                key: apiKey,
-                location: `${lat},${lng}`,
-                radius: radius,
-                keyword: keyword
-            };
+        let attempt = 0;
+        let success = false;
 
-            if (nextPageToken) {
-                params.pagetoken = nextPageToken;
-            }
+        while (attempt < retries && !success) {
+            try {
+                const params = {
+                    key: apiKey,
+                    location: `${lat},${lng}`,
+                    radius: radius,
+                    keyword: keyword
+                };
 
-            const response = await axios.get(
-                'https://maps.googleapis.com/maps/api/place/nearbysearch/json',
-                { params }
-            );
-
-            apiCalls++;
-
-            if (response.data.status === 'OK' || response.data.status === 'ZERO_RESULTS') {
-                places.push(...(response.data.results || []));
-                nextPageToken = response.data.next_page_token || null;
-                
                 if (nextPageToken) {
-                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    params.pagetoken = nextPageToken;
                 }
-            } else if (response.data.status === 'OVER_QUERY_LIMIT') {
-                throw new Error('API quota exceeded');
-            } else {
-                nextPageToken = null;
+
+                const response = await axios.get(
+                    'https://maps.googleapis.com/maps/api/place/nearbysearch/json',
+                    { 
+                        params,
+                        timeout: 10000 // 10 second timeout
+                    }
+                );
+
+                apiCalls++;
+
+                if (response.data.status === 'OK' || response.data.status === 'ZERO_RESULTS') {
+                    places.push(...(response.data.results || []));
+                    nextPageToken = response.data.next_page_token || null;
+                    
+                    if (nextPageToken) {
+                        // Wait 2 seconds for next page token to become active
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                    }
+                    success = true;
+                } else if (response.data.status === 'OVER_QUERY_LIMIT') {
+                    console.log(`Rate limit hit, attempt ${attempt + 1}/${retries}`);
+                    
+                    // Exponential backoff: 2s, 4s, 8s
+                    const backoffDelay = Math.pow(2, attempt + 1) * 1000;
+                    await new Promise(resolve => setTimeout(resolve, backoffDelay));
+                    attempt++;
+                    
+                    if (attempt >= retries) {
+                        throw new Error('API quota exceeded after retries');
+                    }
+                } else if (response.data.status === 'INVALID_REQUEST') {
+                    console.log(`Invalid request for ${keyword}, skipping`);
+                    success = true; // Don't retry invalid requests
+                    nextPageToken = null;
+                } else {
+                    console.log(`Unexpected status: ${response.data.status}, skipping`);
+                    success = true;
+                    nextPageToken = null;
+                }
+            } catch (error) {
+                attempt++;
+                console.error(`Error fetching places (attempt ${attempt}/${retries}):`, error.message);
+                
+                if (attempt >= retries) {
+                    // After all retries failed, return what we have so far
+                    console.log(`Failed after ${retries} attempts, continuing with ${places.length} places found`);
+                    return { places, apiCalls };
+                }
+                
+                // Wait before retry with exponential backoff
+                const backoffDelay = Math.pow(2, attempt) * 1000;
+                await new Promise(resolve => setTimeout(resolve, backoffDelay));
             }
-        } catch (error) {
-            console.error('Error fetching places:', error);
-            throw error;
         }
     } while (nextPageToken);
 
@@ -148,14 +183,26 @@ app.post('/api/validate-key', async (req, res) => {
 app.post('/api/scrape', async (req, res) => {
     const { brands, cityBounds, cityCenter, apiKey, sessionId } = req.body;
 
-    // Set up Server-Sent Events
+    // Set up Server-Sent Events with longer timeout
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // Disable proxy buffering
 
     const sendProgress = (data) => {
         res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
+
+    // Heartbeat to keep connection alive
+    const heartbeatInterval = setInterval(() => {
+        res.write(': heartbeat\n\n');
+    }, 15000); // Every 15 seconds
+
+    // Clean up on connection close
+    req.on('close', () => {
+        clearInterval(heartbeatInterval);
+        console.log('Client disconnected');
+    });
 
     try {
         const grid = generateGrid(cityBounds, 5, cityCenter[0]);
@@ -254,7 +301,9 @@ app.post('/api/scrape', async (req, res) => {
                         allResults.push(result);
                     });
 
-                    await new Promise(resolve => setTimeout(resolve, 100));
+                    // Delay between grid points to avoid rate limiting
+                    // 500ms for large scraping jobs (348 brands)
+                    await new Promise(resolve => setTimeout(resolve, 500));
                 } catch (error) {
                     if (error.message.includes('quota') || error.message.includes('Cost limit')) {
                         sendProgress({
@@ -264,7 +313,10 @@ app.post('/api/scrape', async (req, res) => {
                         res.end();
                         return;
                     }
-                    console.error(`Error for ${brand.brand}:`, error);
+                    // Log error but continue with next grid point
+                    console.error(`Error for ${brand.brand} at grid ${gridIndex + 1}:`, error.message);
+                    // Small delay before continuing
+                    await new Promise(resolve => setTimeout(resolve, 1000));
                 }
             }
         }
@@ -291,13 +343,18 @@ app.post('/api/scrape', async (req, res) => {
         // Give the client time to receive the complete message before closing
         await new Promise(resolve => setTimeout(resolve, 500));
         console.log('🔚 Closing stream');
+        clearInterval(heartbeatInterval);
         res.end();
     } catch (error) {
+        console.error('💥 Scraping error:', error);
         sendProgress({
             type: 'error',
             message: error.message
         });
+        clearInterval(heartbeatInterval);
         res.end();
+    } finally {
+        clearInterval(heartbeatInterval);
     }
 });
 
