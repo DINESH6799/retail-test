@@ -8,35 +8,32 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Initialize Supabase client
+// Initialize Supabase
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
-// Health check endpoint
+// Health check
 app.get('/', (req, res) => {
     res.json({ 
         status: 'ok', 
-        message: 'Retail Brands Scraper API with Supabase (10km grid)',
+        message: 'Retail Brands Scraper API - Polling Mode',
         supabaseConnected: !!supabase,
-        gridSpacing: '10km',
+        mode: 'background-processing',
         endpoints: [
             'POST /api/validate-key',
-            'POST /api/scrape',
-            'GET /api/results/:sessionId'
+            'POST /api/scrape (starts background job)',
+            'GET /api/status/:sessionId (check progress)',
+            'GET /api/results/:sessionId (download results)'
         ]
     });
 });
 
 app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'healthy', 
-        timestamp: new Date().toISOString(),
-        supabase: !!supabase 
-    });
+    res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// Helper function to generate grid
+// Generate grid
 function generateGrid(bounds, spacingKm, centerLat) {
     const latDegPerKm = 1 / 110.574;
     const lngDegPerKm = 1 / (111.320 * Math.cos(centerLat * Math.PI / 180));
@@ -57,7 +54,7 @@ function generateGrid(bounds, spacingKm, centerLat) {
     return grid;
 }
 
-// Fetch places from Google Maps API with retry logic
+// Fetch places with retry
 async function fetchPlaces(lat, lng, keyword, radius, apiKey, retries = 3) {
     const places = [];
     let nextPageToken = null;
@@ -82,10 +79,7 @@ async function fetchPlaces(lat, lng, keyword, radius, apiKey, retries = 3) {
 
                 const response = await axios.get(
                     'https://maps.googleapis.com/maps/api/place/nearbysearch/json',
-                    { 
-                        params,
-                        timeout: 10000
-                    }
+                    { params, timeout: 10000 }
                 );
 
                 apiCalls++;
@@ -99,32 +93,23 @@ async function fetchPlaces(lat, lng, keyword, radius, apiKey, retries = 3) {
                     }
                     success = true;
                 } else if (response.data.status === 'OVER_QUERY_LIMIT') {
-                    console.log(`Rate limit hit, attempt ${attempt + 1}/${retries}`);
                     const backoffDelay = Math.pow(2, attempt + 1) * 1000;
                     await new Promise(resolve => setTimeout(resolve, backoffDelay));
                     attempt++;
                     
                     if (attempt >= retries) {
-                        throw new Error('API quota exceeded after retries');
+                        throw new Error('API quota exceeded');
                     }
-                } else if (response.data.status === 'INVALID_REQUEST') {
-                    console.log(`Invalid request for ${keyword}, skipping`);
-                    success = true;
-                    nextPageToken = null;
                 } else {
-                    console.log(`Unexpected status: ${response.data.status}, skipping`);
                     success = true;
                     nextPageToken = null;
                 }
             } catch (error) {
                 attempt++;
-                console.error(`Error fetching places (attempt ${attempt}/${retries}):`, error.message);
-                
                 if (attempt >= retries) {
-                    console.log(`Failed after ${retries} attempts, continuing`);
+                    console.log(`Failed after ${retries} attempts`);
                     return { places, apiCalls };
                 }
-                
                 const backoffDelay = Math.pow(2, attempt) * 1000;
                 await new Promise(resolve => setTimeout(resolve, backoffDelay));
             }
@@ -154,12 +139,12 @@ app.post('/api/validate-key', async (req, res) => {
         if (response.data.status === 'REQUEST_DENIED') {
             return res.status(400).json({
                 valid: false,
-                error: 'API Key is invalid or Places API is not enabled.'
+                error: 'API Key invalid or Places API not enabled'
             });
         } else if (response.data.status === 'OVER_QUERY_LIMIT') {
             return res.status(400).json({
                 valid: false,
-                error: 'API Key has exceeded its quota.'
+                error: 'API Key quota exceeded'
             });
         }
 
@@ -167,111 +152,45 @@ app.post('/api/validate-key', async (req, res) => {
     } catch (error) {
         res.status(500).json({
             valid: false,
-            error: 'Failed to validate API key.'
+            error: 'Failed to validate API key'
         });
     }
 });
 
-// Start scraping endpoint
-app.post('/api/scrape', async (req, res) => {
-    const { brands, cityBounds, cityCenter, apiKey, sessionId } = req.body;
-
-    if (!supabase) {
-        return res.status(500).json({ 
-            error: 'Supabase not configured. Please set SUPABASE_URL and SUPABASE_KEY.' 
-        });
-    }
-
-    console.log('🚀 Starting scrape with 10km grid...');
-
-    // Set up Server-Sent Events
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-
-    const sendProgress = (data) => {
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
-    };
-
-    const heartbeatInterval = setInterval(() => {
-        res.write(': heartbeat\n\n');
-    }, 15000);
-
-    req.on('close', () => {
-        clearInterval(heartbeatInterval);
-        console.log('Client disconnected');
-    });
-
+// BACKGROUND SCRAPING FUNCTION
+async function runScrapingInBackground(sessionId, brands, cityBounds, cityCenter, apiKey) {
+    console.log(`🚀 Starting background scraping for session: ${sessionId}`);
+    
     try {
-        // 10km grid for good coverage and reasonable speed
-        const grid = generateGrid(cityBounds, 10, cityCenter[0]);
+        const grid = generateGrid(cityBounds, 10, cityCenter[0]); // 10km grid
         const totalOperations = brands.length * grid.length;
         let currentOperation = 0;
         let totalApiCalls = 0;
         const seenPlaceIds = new Set();
 
-        console.log(`Grid size: ${grid.length} points per brand`);
-        console.log(`Total operations: ${totalOperations}`);
+        console.log(`Grid: ${grid.length} points, Total ops: ${totalOperations}`);
 
-        // Create session in Supabase
-        const { error: sessionError } = await supabase
+        // Update session to in_progress
+        await supabase
             .from('scraping_sessions')
-            .insert({
-                session_id: sessionId,
+            .update({
                 status: 'in_progress',
                 total_operations: totalOperations,
-                completed_operations: 0,
-                total_cost: 0,
-                total_results: 0
-            });
-
-        if (sessionError) {
-            console.error('Error creating session:', sessionError);
-            throw new Error('Failed to create scraping session');
-        }
-
-        sendProgress({
-            type: 'start',
-            total: totalOperations
-        });
+                updated_at: new Date().toISOString()
+            })
+            .eq('session_id', sessionId);
 
         // Process each brand
         for (let brandIndex = 0; brandIndex < brands.length; brandIndex++) {
             const brand = brands[brandIndex];
-            
-            console.log(`Processing brand ${brandIndex + 1}/${brands.length}: ${brand.brand}`);
-            
-            sendProgress({
-                type: 'progress',
-                current: currentOperation,
-                total: totalOperations,
-                percentage: Math.round((currentOperation / totalOperations) * 100),
-                message: `Searching for ${brand.brand}...`,
-                currentBrand: brand.brand,
-                brandIndex: brandIndex + 1,
-                totalBrands: brands.length
-            });
+            console.log(`Processing ${brandIndex + 1}/${brands.length}: ${brand.brand}`);
 
-            // Batch results for this brand
             const brandResults = [];
 
-            // Search each grid point
+            // Process each grid point
             for (let gridIndex = 0; gridIndex < grid.length; gridIndex++) {
                 const point = grid[gridIndex];
                 currentOperation++;
-
-                sendProgress({
-                    type: 'progress',
-                    current: currentOperation,
-                    total: totalOperations,
-                    percentage: Math.round((currentOperation / totalOperations) * 100),
-                    message: `Searching for ${brand.brand}...`,
-                    currentBrand: brand.brand,
-                    brandIndex: brandIndex + 1,
-                    totalBrands: brands.length,
-                    gridPoint: `${gridIndex + 1}/${grid.length}`
-                });
 
                 try {
                     const { places, apiCalls } = await fetchPlaces(
@@ -285,17 +204,11 @@ app.post('/api/scrape', async (req, res) => {
                     totalApiCalls += apiCalls;
                     const currentCost = totalApiCalls * (17 / 1000);
 
-                    sendProgress({
-                        type: 'cost-update',
-                        cost: currentCost,
-                        apiCalls: totalApiCalls
-                    });
-
                     if (currentCost > 20000) {
-                        throw new Error('Cost limit of ₹20,000 exceeded');
+                        throw new Error('Cost limit exceeded');
                     }
 
-                    // Collect unique results for this brand
+                    // Collect unique results
                     for (const place of places) {
                         const placeId = place.place_id;
                         
@@ -321,43 +234,60 @@ app.post('/api/scrape', async (req, res) => {
                         });
                     }
 
-                    // Delay between requests
+                    // Small delay between requests
                     await new Promise(resolve => setTimeout(resolve, 300));
                 } catch (error) {
-                    if (error.message.includes('quota') || error.message.includes('Cost limit')) {
-                        sendProgress({
-                            type: 'error',
-                            message: error.message
-                        });
-                        clearInterval(heartbeatInterval);
-                        res.end();
+                    if (error.message.includes('Cost limit')) {
+                        console.error('Cost limit exceeded, stopping');
+                        await supabase
+                            .from('scraping_sessions')
+                            .update({
+                                status: 'failed',
+                                error_message: 'Cost limit exceeded',
+                                updated_at: new Date().toISOString()
+                            })
+                            .eq('session_id', sessionId);
                         return;
                     }
-                    console.error(`Error at grid ${gridIndex + 1}:`, error.message);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    console.error(`Error at grid ${gridIndex}:`, error.message);
+                }
+
+                // Update progress every 10 operations
+                if (currentOperation % 10 === 0) {
+                    await supabase
+                        .from('scraping_sessions')
+                        .update({
+                            completed_operations: currentOperation,
+                            total_cost: totalApiCalls * (17 / 1000),
+                            current_brand: brand.brand,
+                            current_brand_index: brandIndex + 1,
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('session_id', sessionId);
                 }
             }
 
-            // Insert all results for this brand in one go
+            // Insert brand results
             if (brandResults.length > 0) {
-                console.log(`Inserting ${brandResults.length} results for ${brand.brand}`);
+                console.log(`Saving ${brandResults.length} results for ${brand.brand}`);
                 const { error: insertError } = await supabase
                     .from('scraping_results')
                     .insert(brandResults);
 
                 if (insertError) {
                     console.error('Error inserting results:', insertError);
-                } else {
-                    console.log(`✅ Saved ${brandResults.length} results for ${brand.brand}`);
                 }
             }
 
-            // Update session progress
+            // Update session after each brand
             await supabase
                 .from('scraping_sessions')
                 .update({
                     completed_operations: currentOperation,
-                    total_cost: totalApiCalls * (17 / 1000)
+                    total_cost: totalApiCalls * (17 / 1000),
+                    current_brand: brand.brand,
+                    current_brand_index: brandIndex + 1,
+                    updated_at: new Date().toISOString()
                 })
                 .eq('session_id', sessionId);
         }
@@ -368,55 +298,128 @@ app.post('/api/scrape', async (req, res) => {
             .select('*', { count: 'exact', head: true })
             .eq('session_id', sessionId);
 
-        const totalResults = count || 0;
-
-        // Mark session complete
+        // Mark complete
         await supabase
             .from('scraping_sessions')
             .update({
                 status: 'complete',
-                total_results: totalResults,
+                total_results: count || 0,
                 completed_operations: totalOperations,
                 total_cost: totalApiCalls * (17 / 1000),
                 updated_at: new Date().toISOString()
             })
             .eq('session_id', sessionId);
 
-        console.log(`✅ Scraping complete! Found ${totalResults} results`);
+        console.log(`✅ Scraping complete! Session: ${sessionId}, Results: ${count}`);
 
-        sendProgress({
-            type: 'complete',
-            sessionId: sessionId,
-            totalFound: totalResults,
-            totalCost: totalApiCalls * (17 / 1000)
-        });
-
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        clearInterval(heartbeatInterval);
-        res.end();
     } catch (error) {
-        console.error('💥 Scraping error:', error);
-        
-        if (supabase) {
-            await supabase
-                .from('scraping_sessions')
-                .update({ status: 'failed', updated_at: new Date().toISOString() })
-                .eq('session_id', sessionId);
-        }
-        
-        sendProgress({
-            type: 'error',
-            message: error.message
+        console.error('❌ Scraping error:', error);
+        await supabase
+            .from('scraping_sessions')
+            .update({
+                status: 'failed',
+                error_message: error.message,
+                updated_at: new Date().toISOString()
+            })
+            .eq('session_id', sessionId);
+    }
+}
+
+// START SCRAPING (returns immediately, runs in background)
+app.post('/api/scrape', async (req, res) => {
+    const { brands, cityBounds, cityCenter, apiKey, sessionId } = req.body;
+
+    if (!supabase) {
+        return res.status(500).json({ 
+            error: 'Supabase not configured' 
         });
-        clearInterval(heartbeatInterval);
-        res.end();
+    }
+
+    try {
+        // Create session
+        const { error: sessionError } = await supabase
+            .from('scraping_sessions')
+            .insert({
+                session_id: sessionId,
+                status: 'starting',
+                total_operations: 0,
+                completed_operations: 0,
+                total_cost: 0,
+                total_results: 0
+            });
+
+        if (sessionError) {
+            console.error('Error creating session:', sessionError);
+            return res.status(500).json({ error: 'Failed to create session' });
+        }
+
+        // Start background processing (don't await!)
+        runScrapingInBackground(sessionId, brands, cityBounds, cityCenter, apiKey)
+            .catch(err => console.error('Background error:', err));
+
+        // Return immediately
+        res.json({
+            success: true,
+            sessionId: sessionId,
+            message: 'Scraping started in background',
+            statusEndpoint: `/api/status/${sessionId}`
+        });
+
+    } catch (error) {
+        console.error('Error starting scraping:', error);
+        res.status(500).json({ error: 'Failed to start scraping' });
     }
 });
 
-// Get results endpoint
+// GET STATUS (for polling)
+app.get('/api/status/:sessionId', async (req, res) => {
+    const { sessionId } = req.params;
+
+    if (!supabase) {
+        return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    try {
+        const { data: session, error } = await supabase
+            .from('scraping_sessions')
+            .select('*')
+            .eq('session_id', sessionId)
+            .single();
+
+        if (error || !session) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        // Calculate progress percentage
+        const percentage = session.total_operations > 0 
+            ? Math.round((session.completed_operations / session.total_operations) * 100)
+            : 0;
+
+        res.json({
+            sessionId: session.session_id,
+            status: session.status,
+            progress: {
+                current: session.completed_operations,
+                total: session.total_operations,
+                percentage: percentage,
+                currentBrand: session.current_brand,
+                brandIndex: session.current_brand_index
+            },
+            cost: session.total_cost,
+            totalResults: session.total_results,
+            updatedAt: session.updated_at
+        });
+
+    } catch (error) {
+        console.error('Error fetching status:', error);
+        res.status(500).json({ error: 'Failed to fetch status' });
+    }
+});
+
+// GET RESULTS
 app.get('/api/results/:sessionId', async (req, res) => {
     const { sessionId } = req.params;
-    
+
     if (!supabase) {
         return res.status(500).json({ error: 'Supabase not configured' });
     }
@@ -448,6 +451,7 @@ app.get('/api/results/:sessionId', async (req, res) => {
             results: results || [],
             totalCost: session.total_cost
         });
+
     } catch (error) {
         console.error('Error:', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -456,7 +460,7 @@ app.get('/api/results/:sessionId', async (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Grid spacing: 10km`);
-    console.log(`Supabase: ${supabase ? '✅ Connected' : '❌ Not configured'}`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📊 Mode: Background Processing with Polling`);
+    console.log(`💾 Supabase: ${supabase ? '✅ Connected' : '❌ Not configured'}`);
 });
