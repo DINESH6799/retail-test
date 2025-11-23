@@ -11,20 +11,15 @@ app.use(express.json());
 // Initialize Supabase client
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
-
-if (!supabaseUrl || !supabaseKey) {
-    console.error('⚠️  SUPABASE_URL and SUPABASE_KEY environment variables are required!');
-    console.error('Please set them in your Render dashboard under Environment variables.');
-}
-
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
 // Health check endpoint
 app.get('/', (req, res) => {
     res.json({ 
         status: 'ok', 
-        message: 'Retail Brands Scraper API with Supabase storage',
+        message: 'Retail Brands Scraper API with Supabase (10km grid)',
         supabaseConnected: !!supabase,
+        gridSpacing: '10km',
         endpoints: [
             'POST /api/validate-key',
             'POST /api/scrape',
@@ -126,7 +121,7 @@ async function fetchPlaces(lat, lng, keyword, radius, apiKey, retries = 3) {
                 console.error(`Error fetching places (attempt ${attempt}/${retries}):`, error.message);
                 
                 if (attempt >= retries) {
-                    console.log(`Failed after ${retries} attempts, continuing with ${places.length} places found`);
+                    console.log(`Failed after ${retries} attempts, continuing`);
                     return { places, apiCalls };
                 }
                 
@@ -177,15 +172,17 @@ app.post('/api/validate-key', async (req, res) => {
     }
 });
 
-// Start scraping endpoint with Supabase storage
+// Start scraping endpoint
 app.post('/api/scrape', async (req, res) => {
     const { brands, cityBounds, cityCenter, apiKey, sessionId } = req.body;
 
     if (!supabase) {
         return res.status(500).json({ 
-            error: 'Supabase not configured. Please set SUPABASE_URL and SUPABASE_KEY environment variables.' 
+            error: 'Supabase not configured. Please set SUPABASE_URL and SUPABASE_KEY.' 
         });
     }
+
+    console.log('🚀 Starting scrape with 10km grid...');
 
     // Set up Server-Sent Events
     res.setHeader('Content-Type', 'text/event-stream');
@@ -207,11 +204,15 @@ app.post('/api/scrape', async (req, res) => {
     });
 
     try {
-        const grid = generateGrid(cityBounds, 20, cityCenter[0]); // 20km spacing
+        // 10km grid for good coverage and reasonable speed
+        const grid = generateGrid(cityBounds, 10, cityCenter[0]);
         const totalOperations = brands.length * grid.length;
         let currentOperation = 0;
         let totalApiCalls = 0;
         const seenPlaceIds = new Set();
+
+        console.log(`Grid size: ${grid.length} points per brand`);
+        console.log(`Total operations: ${totalOperations}`);
 
         // Create session in Supabase
         const { error: sessionError } = await supabase
@@ -235,8 +236,11 @@ app.post('/api/scrape', async (req, res) => {
             total: totalOperations
         });
 
+        // Process each brand
         for (let brandIndex = 0; brandIndex < brands.length; brandIndex++) {
             const brand = brands[brandIndex];
+            
+            console.log(`Processing brand ${brandIndex + 1}/${brands.length}: ${brand.brand}`);
             
             sendProgress({
                 type: 'progress',
@@ -249,6 +253,10 @@ app.post('/api/scrape', async (req, res) => {
                 totalBrands: brands.length
             });
 
+            // Batch results for this brand
+            const brandResults = [];
+
+            // Search each grid point
             for (let gridIndex = 0; gridIndex < grid.length; gridIndex++) {
                 const point = grid[gridIndex];
                 currentOperation++;
@@ -277,15 +285,6 @@ app.post('/api/scrape', async (req, res) => {
                     totalApiCalls += apiCalls;
                     const currentCost = totalApiCalls * (17 / 1000);
 
-                    // Update session progress in Supabase
-                    await supabase
-                        .from('scraping_sessions')
-                        .update({
-                            completed_operations: currentOperation,
-                            total_cost: currentCost
-                        })
-                        .eq('session_id', sessionId);
-
                     sendProgress({
                         type: 'cost-update',
                         cost: currentCost,
@@ -296,9 +295,7 @@ app.post('/api/scrape', async (req, res) => {
                         throw new Error('Cost limit of ₹20,000 exceeded');
                     }
 
-                    // Store results in Supabase (batch insert for efficiency)
-                    const resultsToInsert = [];
-                    
+                    // Collect unique results for this brand
                     for (const place of places) {
                         const placeId = place.place_id;
                         
@@ -307,7 +304,7 @@ app.post('/api/scrape', async (req, res) => {
                         }
                         seenPlaceIds.add(placeId);
                         
-                        resultsToInsert.push({
+                        brandResults.push({
                             session_id: sessionId,
                             search_brand: brand.brand,
                             search_sku: brand.sku,
@@ -324,44 +321,56 @@ app.post('/api/scrape', async (req, res) => {
                         });
                     }
 
-                    // Insert results in Supabase (if any found)
-                    if (resultsToInsert.length > 0) {
-                        const { error: insertError } = await supabase
-                            .from('scraping_results')
-                            .insert(resultsToInsert);
-
-                        if (insertError) {
-                            console.error('Error inserting results:', insertError);
-                        } else {
-                            console.log(`✅ Inserted ${resultsToInsert.length} results for ${brand.brand}`);
-                        }
-                    }
-
-                    await new Promise(resolve => setTimeout(resolve, 500));
+                    // Delay between requests
+                    await new Promise(resolve => setTimeout(resolve, 300));
                 } catch (error) {
                     if (error.message.includes('quota') || error.message.includes('Cost limit')) {
                         sendProgress({
                             type: 'error',
                             message: error.message
                         });
+                        clearInterval(heartbeatInterval);
                         res.end();
                         return;
                     }
-                    console.error(`Error for ${brand.brand} at grid ${gridIndex + 1}:`, error.message);
+                    console.error(`Error at grid ${gridIndex + 1}:`, error.message);
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 }
             }
+
+            // Insert all results for this brand in one go
+            if (brandResults.length > 0) {
+                console.log(`Inserting ${brandResults.length} results for ${brand.brand}`);
+                const { error: insertError } = await supabase
+                    .from('scraping_results')
+                    .insert(brandResults);
+
+                if (insertError) {
+                    console.error('Error inserting results:', insertError);
+                } else {
+                    console.log(`✅ Saved ${brandResults.length} results for ${brand.brand}`);
+                }
+            }
+
+            // Update session progress
+            await supabase
+                .from('scraping_sessions')
+                .update({
+                    completed_operations: currentOperation,
+                    total_cost: totalApiCalls * (17 / 1000)
+                })
+                .eq('session_id', sessionId);
         }
 
-        // Get total count of results
-        const { count, error: countError } = await supabase
+        // Get final count
+        const { count } = await supabase
             .from('scraping_results')
             .select('*', { count: 'exact', head: true })
             .eq('session_id', sessionId);
 
         const totalResults = count || 0;
 
-        // Update session as complete
+        // Mark session complete
         await supabase
             .from('scraping_sessions')
             .update({
@@ -373,7 +382,7 @@ app.post('/api/scrape', async (req, res) => {
             })
             .eq('session_id', sessionId);
 
-        console.log(`✅ Scraping complete! Found ${totalResults} unique results`);
+        console.log(`✅ Scraping complete! Found ${totalResults} results`);
 
         sendProgress({
             type: 'complete',
@@ -388,14 +397,10 @@ app.post('/api/scrape', async (req, res) => {
     } catch (error) {
         console.error('💥 Scraping error:', error);
         
-        // Update session as failed
         if (supabase) {
             await supabase
                 .from('scraping_sessions')
-                .update({
-                    status: 'failed',
-                    updated_at: new Date().toISOString()
-                })
+                .update({ status: 'failed', updated_at: new Date().toISOString() })
                 .eq('session_id', sessionId);
         }
         
@@ -408,7 +413,7 @@ app.post('/api/scrape', async (req, res) => {
     }
 });
 
-// Endpoint to fetch results from Supabase
+// Get results endpoint
 app.get('/api/results/:sessionId', async (req, res) => {
     const { sessionId } = req.params;
     
@@ -417,7 +422,6 @@ app.get('/api/results/:sessionId', async (req, res) => {
     }
 
     try {
-        // Get session info
         const { data: session, error: sessionError } = await supabase
             .from('scraping_sessions')
             .select('*')
@@ -428,7 +432,6 @@ app.get('/api/results/:sessionId', async (req, res) => {
             return res.status(404).json({ error: 'Session not found' });
         }
 
-        // Get all results for this session
         const { data: results, error: resultsError } = await supabase
             .from('scraping_results')
             .select('*')
@@ -454,5 +457,6 @@ app.get('/api/results/:sessionId', async (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`Grid spacing: 10km`);
     console.log(`Supabase: ${supabase ? '✅ Connected' : '❌ Not configured'}`);
 });
