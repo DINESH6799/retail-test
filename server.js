@@ -299,6 +299,12 @@ app.post('/api/scrape', async (req, res) => {
                             is_brand_match: (place.name || '').toLowerCase().includes(brand.brand.toLowerCase())
                         };
                         allResults.push(result);
+                        
+                        // Send result immediately (don't wait for completion)
+                        sendProgress({
+                            type: 'result',
+                            result: result
+                        });
                     });
 
                     // Delay between grid points to avoid rate limiting
@@ -323,25 +329,17 @@ app.post('/api/scrape', async (req, res) => {
 
         console.log(`✅ Scraping complete! Found ${allResults.length} unique results`);
         
-        // Store results in session
-        scrapingSessions.set(sessionId, {
-            results: allResults,
-            totalCost: totalApiCalls * (17 / 1000),
-            timestamp: Date.now()
-        });
-        
         console.log('📤 Sending complete event to client...');
 
         sendProgress({
             type: 'complete',
-            sessionId: sessionId,
             totalFound: allResults.length,
             totalCost: totalApiCalls * (17 / 1000)
         });
 
         console.log('✅ Complete event sent');
         // Give the client time to receive the complete message before closing
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise(resolve => setTimeout(resolve, 1000));
         console.log('🔚 Closing stream');
         clearInterval(heartbeatInterval);
         res.end();
