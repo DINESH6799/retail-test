@@ -147,7 +147,118 @@
             const [results, setResults] = useState([]);
             const [estimatedCost, setEstimatedCost] = useState(0);
             const [actualCost, setActualCost] = useState(0);
+            const [sessionId, setSessionId] = useState(null);
+            const [pollingInterval, setPollingInterval] = useState(null);
+
             const fileInputRef = useRef(null);
+
+            // Session Recovery - Check on page load
+            useEffect(() => {
+                const savedSessionId = localStorage.getItem('lastSessionId');
+                
+                if (savedSessionId) {
+                    console.log('🔄 Found saved session:', savedSessionId);
+                    
+                    fetch(`${API_URL}/api/status/${savedSessionId}`)
+                        .then(res => res.json())
+                        .then(data => {
+                            console.log('Session status:', data.status);
+                            
+                            if (data.status === 'complete') {
+                                console.log('✅ Previous session complete!');
+                                setSessionId(savedSessionId);
+                                loadResults(savedSessionId);
+                            } else if (data.status === 'in_progress') {
+                                console.log('🔄 Resuming session...');
+                                setSessionId(savedSessionId);
+                                setStep(5);
+                                setIsScraping(true);
+                                startPolling(savedSessionId);
+                            } else if (data.status === 'failed') {
+                                localStorage.removeItem('lastSessionId');
+                                localStorage.removeItem('sessionStartTime');
+                            }
+                        })
+                        .catch(err => {
+                            console.error('Error checking session:', err);
+                            localStorage.removeItem('lastSessionId');
+                            localStorage.removeItem('sessionStartTime');
+                        });
+                }
+            }, []);
+
+            // Load results from completed session
+            const loadResults = async (sessionId) => {
+                try {
+                    const response = await fetch(`${API_URL}/api/results/${sessionId}`);
+                    const data = await response.json();
+                    
+                    if (data.results && data.results.length > 0) {
+                        setResults(data.results);
+                        setActualCost(data.totalCost || 0);
+                        setProgress({
+                            current: data.results.length,
+                            total: data.results.length,
+                            message: `Complete! Found ${data.results.length} locations.`,
+                            percentage: 100
+                        });
+                        setStep(6);
+                        localStorage.removeItem('lastSessionId');
+                        localStorage.removeItem('sessionStartTime');
+                    }
+                } catch (error) {
+                    console.error('Error loading results:', error);
+                    alert('Failed to load results.');
+                }
+            };
+
+            // Start polling for status
+            const startPolling = (sessionId) => {
+                console.log('🔄 Starting polling:', sessionId);
+                
+                const interval = setInterval(async () => {
+                    try {
+                        const response = await fetch(`${API_URL}/api/status/${sessionId}`);
+                        const data = await response.json();
+                        
+                        setProgress({
+                            current: data.progress.current,
+                            total: data.progress.total,
+                            message: `Searching for ${data.progress.currentBrand || 'brands'}...`,
+                            percentage: data.progress.percentage,
+                            currentBrand: data.progress.currentBrand,
+                            brandIndex: data.progress.brandIndex
+                        });
+                        
+                        setActualCost(data.cost || 0);
+                        
+                        if (data.status === 'complete') {
+                            console.log('✅ Complete!');
+                            clearInterval(interval);
+                            setPollingInterval(null);
+                            await loadResults(sessionId);
+                        } else if (data.status === 'failed') {
+                            clearInterval(interval);
+                            setPollingInterval(null);
+                            alert('Scraping failed.');
+                            setStep(4);
+                            setIsScraping(false);
+                        }
+                    } catch (error) {
+                        console.error('Poll error:', error);
+                    }
+                }, 10000);
+                
+                setPollingInterval(interval);
+            };
+
+            // Cleanup polling
+            useEffect(() => {
+                return () => {
+                    if (pollingInterval) clearInterval(pollingInterval);
+                };
+            }, [pollingInterval]);
+
 
             // Cleaning function - strict brand name matching
             const isStrictBrandMatch = (locationName, brandName) => {
@@ -417,154 +528,60 @@
             };
 
             const startScraping = async () => {
-                console.log('🚀 Starting scraping...');
+                console.log('🚀 Starting scraping (polling mode)...');
                 
                 const isValid = await validateApiKey();
                 if (!isValid) {
-                    console.log('❌ API key validation failed');
+                    alert('Invalid API key. Please check and try again.');
                     return;
                 }
 
-                console.log('✅ API key validated successfully');
-
                 if (estimatedCost > 20000) {
-                    alert(`Estimated cost (₹${estimatedCost.toFixed(2)}) exceeds the limit of ₹20,000. Please reduce the number of brands or select a smaller city.`);
+                    alert(`Estimated cost (₹${estimatedCost.toFixed(2)}) exceeds ₹20,000 limit.`);
                     return;
                 }
 
                 setIsScraping(true);
                 setStep(5);
-                setActualCost(0);
-                setProgress({ current: 0, total: 0, message: 'Initializing...', percentage: 0 });
-
-                console.log('📤 Sending scraping request to backend...');
-
-                const sessionId = Date.now().toString();
-                let finalCost = 0;
-                let isComplete = false;
-                let completedSuccessfully = false;
+                setProgress({ current: 0, total: 0, message: 'Starting...', percentage: 0 });
+                
+                const newSessionId = Date.now().toString();
+                setSessionId(newSessionId);
+                
+                localStorage.setItem('lastSessionId', newSessionId);
+                localStorage.setItem('sessionStartTime', new Date().toISOString());
 
                 try {
                     const cityData = INDIAN_CITIES[selectedCity];
                     
                     const response = await fetch(`${API_URL}/api/scrape`, {
                         method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             brands: brands,
                             cityBounds: cityData.bounds,
                             cityCenter: cityData.center,
                             apiKey: apiKey,
-                            sessionId: sessionId
+                            sessionId: newSessionId
                         })
                     });
 
-                    console.log('📡 Scraping response received');
-
-                    if (!response.ok) {
-                        throw new Error(`Server responded with status: ${response.status}`);
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        console.log('✅ Started in background!');
+                        startPolling(newSessionId);
+                    } else {
+                        throw new Error(data.error || 'Failed to start scraping');
                     }
 
-                    const reader = response.body.getReader();
-                    const decoder = new TextDecoder();
-                    let isComplete = false;
-
-                    while (true) {
-                        const { value, done } = await reader.read();
-                        if (done) {
-                            console.log('✅ Scraping stream complete');
-                            
-                            // CRITICAL FIX: Fetch results from Supabase when stream completes
-                            if (completedSuccessfully) {
-                                console.log('📥 Fetching results from Supabase...');
-                                try {
-                                    const resultsResponse = await fetch(`${API_URL}/api/results/${sessionId}`);
-                                    const resultsData = await resultsResponse.json();
-                                    
-                                    if (resultsData.results && resultsData.results.length > 0) {
-                                        console.log(`✅ Got ${resultsData.results.length} results`);
-                                        setResults(resultsData.results);
-                                        setProgress({
-                                            current: resultsData.results.length,
-                                            total: resultsData.results.length,
-                                            message: `Scraping complete! Found ${resultsData.results.length} unique locations.`,
-                                            percentage: 100
-                                        });
-                                        setStep(6);
-                                    } else {
-                                        console.warn('⚠️ No results found');
-                                        alert('Scraping completed but no results found. Check Supabase.');
-                                        setStep(4);
-                                    }
-                                } catch (fetchError) {
-                                    console.error('❌ Error fetching results:', fetchError);
-                                    alert('Scraping completed but failed to fetch results. Check Supabase directly.');
-                                    setStep(4);
-                                }
-                            }
-                            break;
-                        }
-
-                        const chunk = decoder.decode(value);
-                        const lines = chunk.split('\n');
-
-                        for (const line of lines) {
-                            if (line.startsWith('data: ')) {
-                                try {
-                                    const data = JSON.parse(line.substring(6));
-                                    console.log('📊 Progress update:', data.type, data.percentage || '');
-
-                                    if (data.type === 'start') {
-                                        setProgress({
-                                            current: 0,
-                                            total: data.total,
-                                            message: 'Starting scrape...',
-                                            percentage: 0
-                                        });
-                                    } else if (data.type === 'progress') {
-                                        setProgress({
-                                            current: data.current,
-                                            total: data.total,
-                                            message: data.message,
-                                            percentage: data.percentage,
-                                            currentBrand: data.currentBrand,
-                                            brandIndex: data.brandIndex,
-                                            totalBrands: data.totalBrands,
-                                            gridPoint: data.gridPoint
-                                        });
-                                    } else if (data.type === 'cost-update') {
-                                        setActualCost(data.cost);
-                                        finalCost = data.cost;
-                                    } else if (data.type === 'complete') {
-                                        console.log('🎉 Scraping complete!', data.totalFound, 'locations found');
-                                        isComplete = true;
-                                        completedSuccessfully = true;
-                                        finalCost = data.totalCost || finalCost;
-                                        setActualCost(finalCost);
-                                        // Results will be fetched when stream closes
-                                    } else if (data.type === 'error') {
-                                        console.error('❌ Scraping error:', data.message);
-                                        alert(data.message);
-                                        setStep(4);
-                                        return;
-                                    }
-                                } catch (parseError) {
-                                    console.warn('Failed to parse SSE data:', parseError);
-                                }
-                            }
-                        }
-                    }
                 } catch (error) {
-                    console.error('💥 Scraping error:', error);
-                    // Only show error if we haven't already moved to step 6 (completed)
-                    if (step !== 6) {
-                        alert(`An error occurred during scraping: ${error.message}. Please try again.`);
-                        setStep(4);
-                    }
-                } finally {
+                    console.error('Error:', error);
+                    alert(`Failed to start: ${error.message}`);
                     setIsScraping(false);
+                    setStep(4);
+                    localStorage.removeItem('lastSessionId');
+                    localStorage.removeItem('sessionStartTime');
                 }
             };
 
