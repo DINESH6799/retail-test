@@ -205,7 +205,7 @@ app.post('/api/scrape', async (req, res) => {
     });
 
     try {
-        const grid = generateGrid(cityBounds, 5, cityCenter[0]);
+        const grid = generateGrid(cityBounds, 20, cityCenter[0]); // 20km spacing (12 points) - FASTEST
         const totalOperations = brands.length * grid.length;
         let currentOperation = 0;
         let totalApiCalls = 0;
