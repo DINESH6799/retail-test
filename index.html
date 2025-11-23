@@ -272,7 +272,7 @@
                 const bounds = cityData.bounds;
                 
                 // Calculate grid points
-                const gridSpacing = 20; // km - FASTEST scraping (3-4 hours)
+                const gridSpacing = 10; // km - FASTEST scraping (3-4 hours)
                 const latDegPerKm = 1 / 110.574;
                 const lngDegPerKm = 1 / (111.320 * Math.cos(cityData.center[0] * Math.PI / 180));
                 
@@ -439,9 +439,8 @@
 
                 console.log('📤 Sending scraping request to backend...');
 
-                // Collect results as they stream in
-                const collectedResults = [];
                 let finalCost = 0;
+                let isComplete = false;
 
                 try {
                     const cityData = INDIAN_CITIES[selectedCity];
@@ -468,35 +467,23 @@
 
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
+                    let isComplete = false;
 
                     while (true) {
                         const { value, done } = await reader.read();
                         if (done) {
                             console.log('✅ Scraping stream complete');
-                            if (collectedResults.length > 0) {
-                                console.log(`📊 Collected ${collectedResults.length} results`);
-                                setResults(collectedResults);
-                                setProgress({
-                                    current: collectedResults.length,
-                                    total: collectedResults.length,
-                                    message: `Scraping complete! Found ${collectedResults.length} unique locations.`,
-                                    percentage: 100
-                                });
-                                setStep(6);
-                            } else {
-                                alert('Scraping completed but no results found.');
-                                setStep(4);
-                            }
                             break;
                         }
 
                         const chunk = decoder.decode(value);
-                        const lines = chunk.split('');
+                        const lines = chunk.split('\n');
 
                         for (const line of lines) {
                             if (line.startsWith('data: ')) {
                                 try {
                                     const data = JSON.parse(line.substring(6));
+                                    console.log('📊 Progress update:', data.type, data.percentage || '');
 
                                     if (data.type === 'start') {
                                         setProgress({
@@ -519,30 +506,52 @@
                                     } else if (data.type === 'cost-update') {
                                         setActualCost(data.cost);
                                         finalCost = data.cost;
-                                    } else if (data.type === 'result') {
-                                        if (data.result) {
-                                            collectedResults.push(data.result);
-                                        }
                                     } else if (data.type === 'complete') {
-                                        console.log('🎉 Complete event received');
+                                        console.log('🎉 Scraping complete!', data.totalFound, 'locations found');
+                                        isComplete = true;
                                         finalCost = data.totalCost || finalCost;
                                         setActualCost(finalCost);
+                                        
+                                        // Fetch results from server
+                                        console.log('📥 Fetching results from server...');
+                                        try {
+                                            const resultsResponse = await fetch(`${API_URL}/api/results/${data.sessionId}`);
+                                            const resultsData = await resultsResponse.json();
+                                            
+                                            if (resultsData.results) {
+                                                setResults(resultsData.results);
+                                                setProgress({
+                                                    current: resultsData.results.length,
+                                                    total: resultsData.results.length,
+                                                    message: `Scraping complete! Found ${resultsData.results.length} unique locations.`,
+                                                    percentage: 100
+                                                });
+                                                setStep(6);
+                                            }
+                                        } catch (fetchError) {
+                                            console.error('Error fetching results:', fetchError);
+                                            alert('Scraping completed but failed to fetch results. Please try again.');
+                                            setStep(4);
+                                        }
                                     } else if (data.type === 'error') {
-                                        console.error('❌ Error:', data.message);
+                                        console.error('❌ Scraping error:', data.message);
                                         alert(data.message);
                                         setStep(4);
                                         return;
                                     }
                                 } catch (parseError) {
-                                    // Ignore heartbeat parse errors
+                                    console.warn('Failed to parse SSE data:', parseError);
                                 }
                             }
                         }
                     }
                 } catch (error) {
                     console.error('💥 Scraping error:', error);
-                    alert(`An error occurred: ${error.message}`);
-                    setStep(4);
+                    // Only show error if we haven't already moved to step 6 (completed)
+                    if (step !== 6) {
+                        alert(`An error occurred during scraping: ${error.message}. Please try again.`);
+                        setStep(4);
+                    }
                 } finally {
                     setIsScraping(false);
                 }
