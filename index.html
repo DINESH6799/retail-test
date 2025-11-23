@@ -272,7 +272,7 @@
                 const bounds = cityData.bounds;
                 
                 // Calculate grid points
-                const gridSpacing = 5; // km
+                const gridSpacing = 20; // km - FASTEST scraping (3-4 hours)
                 const latDegPerKm = 1 / 110.574;
                 const lngDegPerKm = 1 / (111.320 * Math.cos(cityData.center[0] * Math.PI / 180));
                 
