@@ -272,7 +272,7 @@
                 const bounds = cityData.bounds;
                 
                 // Calculate grid points
-                const gridSpacing = 10; // km - FASTEST scraping (3-4 hours)
+                const gridSpacing = 20; // km - FASTEST scraping (3-4 hours)
                 const latDegPerKm = 1 / 110.574;
                 const lngDegPerKm = 1 / (111.320 * Math.cos(cityData.center[0] * Math.PI / 180));
                 
@@ -439,8 +439,10 @@
 
                 console.log('📤 Sending scraping request to backend...');
 
+                const sessionId = Date.now().toString();
                 let finalCost = 0;
                 let isComplete = false;
+                let completedSuccessfully = false;
 
                 try {
                     const cityData = INDIAN_CITIES[selectedCity];
@@ -455,7 +457,7 @@
                             cityBounds: cityData.bounds,
                             cityCenter: cityData.center,
                             apiKey: apiKey,
-                            sessionId: Date.now().toString()
+                            sessionId: sessionId
                         })
                     });
 
@@ -473,6 +475,35 @@
                         const { value, done } = await reader.read();
                         if (done) {
                             console.log('✅ Scraping stream complete');
+                            
+                            // CRITICAL FIX: Fetch results from Supabase when stream completes
+                            if (completedSuccessfully) {
+                                console.log('📥 Fetching results from Supabase...');
+                                try {
+                                    const resultsResponse = await fetch(`${API_URL}/api/results/${sessionId}`);
+                                    const resultsData = await resultsResponse.json();
+                                    
+                                    if (resultsData.results && resultsData.results.length > 0) {
+                                        console.log(`✅ Got ${resultsData.results.length} results`);
+                                        setResults(resultsData.results);
+                                        setProgress({
+                                            current: resultsData.results.length,
+                                            total: resultsData.results.length,
+                                            message: `Scraping complete! Found ${resultsData.results.length} unique locations.`,
+                                            percentage: 100
+                                        });
+                                        setStep(6);
+                                    } else {
+                                        console.warn('⚠️ No results found');
+                                        alert('Scraping completed but no results found. Check Supabase.');
+                                        setStep(4);
+                                    }
+                                } catch (fetchError) {
+                                    console.error('❌ Error fetching results:', fetchError);
+                                    alert('Scraping completed but failed to fetch results. Check Supabase directly.');
+                                    setStep(4);
+                                }
+                            }
                             break;
                         }
 
@@ -509,30 +540,10 @@
                                     } else if (data.type === 'complete') {
                                         console.log('🎉 Scraping complete!', data.totalFound, 'locations found');
                                         isComplete = true;
+                                        completedSuccessfully = true;
                                         finalCost = data.totalCost || finalCost;
                                         setActualCost(finalCost);
-                                        
-                                        // Fetch results from server
-                                        console.log('📥 Fetching results from server...');
-                                        try {
-                                            const resultsResponse = await fetch(`${API_URL}/api/results/${data.sessionId}`);
-                                            const resultsData = await resultsResponse.json();
-                                            
-                                            if (resultsData.results) {
-                                                setResults(resultsData.results);
-                                                setProgress({
-                                                    current: resultsData.results.length,
-                                                    total: resultsData.results.length,
-                                                    message: `Scraping complete! Found ${resultsData.results.length} unique locations.`,
-                                                    percentage: 100
-                                                });
-                                                setStep(6);
-                                            }
-                                        } catch (fetchError) {
-                                            console.error('Error fetching results:', fetchError);
-                                            alert('Scraping completed but failed to fetch results. Please try again.');
-                                            setStep(4);
-                                        }
+                                        // Results will be fetched when stream closes
                                     } else if (data.type === 'error') {
                                         console.error('❌ Scraping error:', data.message);
                                         alert(data.message);
