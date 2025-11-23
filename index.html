@@ -586,36 +586,57 @@
                 }
             };
 
-            const downloadResults = (useClean = false) => {
-                const dataToDownload = useClean ? cleanResults(results) : results;
-                const headers = ['brand', 'sku', 'category', 'gmaps_category', 'name', 'address', 'latitude', 'longitude', 'business_status', 'gmaps_url', 'is_brand_match'];
-                const csvContent = [
-                    headers.join(','),
-                    ...dataToDownload.map(row => [
-                        row.search_brand,
-                        row.search_sku,
-                        row.search_category,
-                        row.gmaps_category,
-                        `"${(row.name || '').replace(/"/g, '""')}"`,
-                        `"${(row.address || '').replace(/"/g, '""')}"`,
-                        row.latitude,
-                        row.longitude,
-                        row.business_status,
-                        row.gmaps_url,
-                        row.is_brand_match
-                    ].join(','))
-                ].join('\n');
+            const downloadResults = async (useClean = false) => {
+                // Don't use state (limited to 1000)! Fetch fresh from backend
+                try {
+                    console.log('📥 Fetching ALL results for download...');
+                    
+                    const response = await fetch(`${API_URL}/api/results/${sessionId}`);
+                    const data = await response.json();
+                    
+                    if (!data.results || data.results.length === 0) {
+                        alert('No results found. Please try again.');
+                        return;
+                    }
+                    
+                    console.log(`✅ Fetched ${data.results.length} results for download`);
+                    
+                    const dataToDownload = useClean ? cleanResults(data.results) : data.results;
+                    
+                    const headers = ['brand', 'sku', 'category', 'gmaps_category', 'name', 'address', 'latitude', 'longitude', 'business_status', 'gmaps_url', 'is_brand_match'];
+                    const csvContent = [
+                        headers.join(','),
+                        ...dataToDownload.map(row => [
+                            row.search_brand,
+                            row.search_sku,
+                            row.search_category,
+                            row.gmaps_category,
+                            `"${(row.name || '').replace(/"/g, '""')}"`,
+                            `"${(row.address || '').replace(/"/g, '""')}"`,
+                            row.latitude,
+                            row.longitude,
+                            row.business_status,
+                            row.gmaps_url,
+                            row.is_brand_match
+                        ].join(','))
+                    ].join('\n');
 
-                const blob = new Blob([csvContent], { type: 'text/csv' });
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                const suffix = useClean ? '_CLEAN' : '_RAW';
-                a.download = `${selectedCity.replace(/\s+/g, '_')}_brand_results${suffix}_${new Date().toISOString().split('T')[0]}.csv`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                window.URL.revokeObjectURL(url);
+                    const blob = new Blob([csvContent], { type: 'text/csv' });
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    const suffix = useClean ? '_CLEAN' : '_RAW';
+                    a.download = `${selectedCity.replace(/\s+/g, '_')}_brand_results${suffix}_${new Date().toISOString().split('T')[0]}.csv`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    window.URL.revokeObjectURL(url);
+                    
+                    console.log(`✅ Downloaded ${dataToDownload.length} rows`);
+                } catch (error) {
+                    console.error('Download error:', error);
+                    alert('Failed to download results. Please try again.');
+                }
             };
 
             const resetApp = () => {
@@ -1012,6 +1033,14 @@
                                                 <span className="text-gray-600">Total Locations Found:</span>
                                                 <span className="font-semibold text-blue-600">{results.length}</span>
                                             </div>
+                                            {results.length === 1000 && (
+                                                <div className="bg-yellow-50 border border-yellow-200 rounded p-3">
+                                                    <p className="text-sm text-yellow-800">
+                                                        <i className="fas fa-info-circle mr-2"></i>
+                                                        <strong>Note:</strong> Display limited to 1,000 rows. Your download will include ALL results from the session.
+                                                    </p>
+                                                </div>
+                                            )}
                                             <div className="flex justify-between border-b pb-3">
                                                 <span className="text-gray-600">City:</span>
                                                 <span className="font-semibold">{selectedCity}</span>
