@@ -227,7 +227,8 @@
                             message: `Searching for ${data.progress.currentBrand || 'brands'}...`,
                             percentage: data.progress.percentage,
                             currentBrand: data.progress.currentBrand,
-                            brandIndex: data.progress.brandIndex
+                            brandIndex: data.progress.brandIndex,
+                            totalBrands: brands.length
                         });
                         
                         setActualCost(data.cost || 0);
