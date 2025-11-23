@@ -1,7 +1,7 @@
 {
   "name": "retail-brands-scraper-backend",
   "version": "1.0.0",
-  "description": "Backend API for Retail Brands Scraper",
+  "description": "Backend API for Retail Brands Scraper with Supabase storage",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -10,7 +10,8 @@
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "@supabase/supabase-js": "^2.39.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
