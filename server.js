@@ -166,7 +166,7 @@ async function runScrapingInBackground(sessionId, brands, cityBounds, cityCenter
         const totalOperations = brands.length * grid.length;
         let currentOperation = 0;
         let totalApiCalls = 0;
-        const seenPlaceIds = new Set();
+        // REMOVED: Global seenPlaceIds - was causing massive data loss!
 
         console.log(`Grid: ${grid.length} points, Total ops: ${totalOperations}`);
 
@@ -186,6 +186,7 @@ async function runScrapingInBackground(sessionId, brands, cityBounds, cityCenter
             console.log(`Processing ${brandIndex + 1}/${brands.length}: ${brand.brand}`);
 
             const brandResults = [];
+            const brandSeenPlaceIds = new Set(); // Per-brand deduplication!
 
             // Process each grid point
             for (let gridIndex = 0; gridIndex < grid.length; gridIndex++) {
@@ -208,14 +209,15 @@ async function runScrapingInBackground(sessionId, brands, cityBounds, cityCenter
                         throw new Error('Cost limit exceeded');
                     }
 
-                    // Collect unique results
+                    // Collect unique results PER BRAND (not globally!)
                     for (const place of places) {
                         const placeId = place.place_id;
                         
-                        if (!placeId || seenPlaceIds.has(placeId)) {
+                        // Only skip if we've seen this place for THIS brand
+                        if (!placeId || brandSeenPlaceIds.has(placeId)) {
                             continue;
                         }
-                        seenPlaceIds.add(placeId);
+                        brandSeenPlaceIds.add(placeId);
                         
                         brandResults.push({
                             session_id: sessionId,
