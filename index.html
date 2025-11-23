@@ -19,6 +19,36 @@
         // Backend API URL - change this to your deployed backend URL
         const API_URL = 'https://retail-test-b54d.onrender.com';
 
+        // Category-based filtering rules
+        const CATEGORY_FILTERS = {
+            'Apparel': ['clothing_store', 'shoe_store', 'department_store', 'shopping_mall', 'store'],
+            'F&B': ['restaurant', 'cafe', 'meal_takeaway', 'bakery', 'food', 'meal_delivery', 'bar'],
+            'Electronics': ['electronics_store', 'store', 'home_goods_store'],
+            'Grocery': ['supermarket', 'grocery_or_supermarket', 'store', 'convenience_store'],
+            'Pharmacy': ['pharmacy', 'drugstore', 'health', 'store'],
+            'Cinema': ['movie_theater', 'movie_rental'],
+            'Realty': ['real_estate_agency', 'point_of_interest'],
+            'Salons': ['hair_care', 'beauty_salon', 'spa'],
+            'Mobile Stores': ['electronics_store', 'store'],
+            'Opticals': ['health', 'store']
+        };
+
+        // Invalid location name patterns to remove
+        const INVALID_PATTERNS = [
+            // Roads and streets
+            /\b(road|street|highway|lane|avenue|marg|path)\b/i,
+            // Residential
+            /\b(apartment|complex|residence|society|villa|tower|flat)\b/i,
+            // Areas and zones
+            /\b(area|zone|sector|block|phase)\b/i,
+            // Non-retail locations
+            /\b(hospital|clinic|school|college|university|atm|bank|post office)\b/i,
+            // Generic/vague
+            /^(near|opp|opposite|next to|behind)\b/i,
+            // Just numbers or coordinates
+            /^[\d\s,.-]+$/
+        ];
+
         // Indian cities with their boundaries for grid-based scraping
         const INDIAN_CITIES = {
             "Delhi NCR": {
@@ -118,6 +148,93 @@
             const [estimatedCost, setEstimatedCost] = useState(0);
             const [actualCost, setActualCost] = useState(0);
             const fileInputRef = useRef(null);
+
+            // Cleaning function - strict brand name matching
+            const isStrictBrandMatch = (locationName, brandName) => {
+                if (!locationName || !brandName) return false;
+                
+                const name = locationName.toLowerCase().trim();
+                const brand = brandName.toLowerCase().trim();
+                
+                // Exact match or brand at start of name
+                if (name === brand || name.startsWith(brand + ' ')) return true;
+                
+                // Brand with common suffixes
+                const validSuffixes = ['store', 'outlet', 'shop', 'showroom', 'retail', 'factory'];
+                for (const suffix of validSuffixes) {
+                    if (name === `${brand} ${suffix}` || name === `${brand}-${suffix}`) {
+                        return true;
+                    }
+                }
+                
+                // Check if brand is a complete word in the name (not part of another word)
+                const words = name.split(/\s+/);
+                return words.includes(brand);
+            };
+
+            // Check if location name contains invalid patterns
+            const hasInvalidPattern = (name) => {
+                if (!name) return true;
+                return INVALID_PATTERNS.some(pattern => pattern.test(name));
+            };
+
+            // Check if category is valid for brand category
+            const isValidCategory = (gmapsCategory, brandCategory) => {
+                if (!gmapsCategory || !brandCategory) return false;
+                
+                const allowedCategories = CATEGORY_FILTERS[brandCategory] || [];
+                return allowedCategories.some(cat => 
+                    gmapsCategory.toLowerCase().includes(cat.toLowerCase())
+                );
+            };
+
+            // Main cleaning function
+            const cleanResults = (rawResults) => {
+                return rawResults.filter(result => {
+                    // 1. Must have required data
+                    if (!result.name || !result.address || !result.latitude || !result.longitude) {
+                        return false;
+                    }
+
+                    // 2. Must be operational
+                    if (result.business_status !== 'OPERATIONAL') {
+                        return false;
+                    }
+
+                    // 3. Strict brand name matching
+                    if (!isStrictBrandMatch(result.name, result.search_brand)) {
+                        return false;
+                    }
+
+                    // 4. No invalid patterns in name
+                    if (hasInvalidPattern(result.name)) {
+                        return false;
+                    }
+
+                    // 5. Valid category for brand type
+                    if (!isValidCategory(result.gmaps_category, result.search_category)) {
+                        return false;
+                    }
+
+                    return true;
+                });
+            };
+
+            // Get cleaning stats
+            const getCleaningStats = (raw, clean) => {
+                return {
+                    total: raw.length,
+                    cleaned: clean.length,
+                    removed: raw.length - clean.length,
+                    removedByReason: {
+                        missingData: raw.filter(r => !r.name || !r.address || !r.latitude || !r.longitude).length,
+                        notOperational: raw.filter(r => r.business_status !== 'OPERATIONAL').length,
+                        brandMismatch: raw.filter(r => !isStrictBrandMatch(r.name, r.search_brand)).length,
+                        invalidPattern: raw.filter(r => hasInvalidPattern(r.name)).length,
+                        wrongCategory: raw.filter(r => !isValidCategory(r.gmaps_category, r.search_category)).length
+                    }
+                };
+            };
 
             const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                 city.toLowerCase().includes(citySearch.toLowerCase())
@@ -440,17 +557,18 @@
                 }
             };
 
-            const downloadResults = () => {
+            const downloadResults = (useClean = false) => {
+                const dataToDownload = useClean ? cleanResults(results) : results;
                 const headers = ['brand', 'sku', 'category', 'gmaps_category', 'name', 'address', 'latitude', 'longitude', 'business_status', 'gmaps_url', 'is_brand_match'];
                 const csvContent = [
                     headers.join(','),
-                    ...results.map(row => [
+                    ...dataToDownload.map(row => [
                         row.search_brand,
                         row.search_sku,
                         row.search_category,
                         row.gmaps_category,
-                        `"${row.name.replace(/"/g, '""')}"`,
-                        `"${row.address.replace(/"/g, '""')}"`,
+                        `"${(row.name || '').replace(/"/g, '""')}"`,
+                        `"${(row.address || '').replace(/"/g, '""')}"`,
                         row.latitude,
                         row.longitude,
                         row.business_status,
@@ -463,7 +581,8 @@
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `${selectedCity.replace(/\s+/g, '_')}_brand_results_${new Date().toISOString().split('T')[0]}.csv`;
+                const suffix = useClean ? '_CLEAN' : '_RAW';
+                a.download = `${selectedCity.replace(/\s+/g, '_')}_brand_results${suffix}_${new Date().toISOString().split('T')[0]}.csv`;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
@@ -841,53 +960,111 @@
                             )}
 
                             {/* Step 6: Download Results */}
-                            {step === 6 && (
-                                <div className="space-y-6">
-                                    <div className="text-center">
-                                        <i className="fas fa-check-circle text-6xl text-green-500 mb-4"></i>
-                                        <h2 className="text-2xl font-semibold text-gray-800 mb-2">
-                                            Scraping Complete!
-                                        </h2>
-                                        <p className="text-gray-600">
-                                            Your results are ready to download
-                                        </p>
-                                    </div>
+                            {step === 6 && (() => {
+                                const cleanedResults = cleanResults(results);
+                                const stats = getCleaningStats(results, cleanedResults);
+                                
+                                return (
+                                    <div className="space-y-6">
+                                        <div className="text-center">
+                                            <i className="fas fa-check-circle text-6xl text-green-500 mb-4"></i>
+                                            <h2 className="text-2xl font-semibold text-gray-800 mb-2">
+                                                Scraping Complete!
+                                            </h2>
+                                            <p className="text-gray-600">
+                                                Your results are ready to download
+                                            </p>
+                                        </div>
 
-                                    <div className="bg-gray-50 rounded-lg p-6 space-y-4">
-                                        <div className="flex justify-between border-b pb-3">
-                                            <span className="text-gray-600">Total Locations Found:</span>
-                                            <span className="font-semibold text-green-600">{results.length}</span>
+                                        {/* Raw Results Summary */}
+                                        <div className="bg-gray-50 rounded-lg p-6 space-y-4">
+                                            <h3 className="font-semibold text-gray-800 mb-3">📊 Raw Results Summary</h3>
+                                            <div className="flex justify-between border-b pb-3">
+                                                <span className="text-gray-600">Total Locations Found:</span>
+                                                <span className="font-semibold text-blue-600">{results.length}</span>
+                                            </div>
+                                            <div className="flex justify-between border-b pb-3">
+                                                <span className="text-gray-600">City:</span>
+                                                <span className="font-semibold">{selectedCity}</span>
+                                            </div>
+                                            <div className="flex justify-between border-b pb-3">
+                                                <span className="text-gray-600">Brands Scraped:</span>
+                                                <span className="font-semibold">{brands.length}</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span className="text-gray-600">Total Cost:</span>
+                                                <span className="font-semibold text-indigo-600">₹{actualCost.toFixed(2)}</span>
+                                            </div>
                                         </div>
-                                        <div className="flex justify-between border-b pb-3">
-                                            <span className="text-gray-600">City:</span>
-                                            <span className="font-semibold">{selectedCity}</span>
-                                        </div>
-                                        <div className="flex justify-between border-b pb-3">
-                                            <span className="text-gray-600">Brands Scraped:</span>
-                                            <span className="font-semibold">{brands.length}</span>
-                                        </div>
-                                        <div className="flex justify-between">
-                                            <span className="text-gray-600">Total Cost:</span>
-                                            <span className="font-semibold text-indigo-600">₹{actualCost.toFixed(2)}</span>
-                                        </div>
-                                    </div>
 
-                                    <div className="flex flex-col space-y-3">
-                                        <button
-                                            onClick={downloadResults}
-                                            className="w-full bg-green-600 text-white px-6 py-4 rounded-lg hover:bg-green-700 transition-colors text-lg font-semibold"
-                                        >
-                                            <i className="fas fa-download mr-2"></i> Download Results CSV
-                                        </button>
-                                        <button
-                                            onClick={resetApp}
-                                            className="w-full bg-gray-200 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-300 transition-colors"
-                                        >
-                                            <i className="fas fa-redo mr-2"></i> Start New Scraping
-                                        </button>
+                                        {/* Cleaned Results Summary */}
+                                        <div className="bg-green-50 border-2 border-green-200 rounded-lg p-6 space-y-4">
+                                            <h3 className="font-semibold text-green-800 mb-3">✨ Clean Results Summary</h3>
+                                            <div className="flex justify-between border-b border-green-200 pb-3">
+                                                <span className="text-green-700">Valid Locations:</span>
+                                                <span className="font-semibold text-green-600 text-lg">{cleanedResults.length}</span>
+                                            </div>
+                                            <div className="flex justify-between border-b border-green-200 pb-3">
+                                                <span className="text-green-700">Removed:</span>
+                                                <span className="font-semibold text-red-600">{stats.removed}</span>
+                                            </div>
+                                            <div className="mt-4 pt-4 border-t border-green-200">
+                                                <p className="text-sm text-green-700 font-semibold mb-2">Removed by reason:</p>
+                                                <div className="grid grid-cols-2 gap-2 text-sm">
+                                                    <div className="flex justify-between">
+                                                        <span className="text-gray-600">Missing data:</span>
+                                                        <span className="font-semibold">{stats.removedByReason.missingData}</span>
+                                                    </div>
+                                                    <div className="flex justify-between">
+                                                        <span className="text-gray-600">Not operational:</span>
+                                                        <span className="font-semibold">{stats.removedByReason.notOperational}</span>
+                                                    </div>
+                                                    <div className="flex justify-between">
+                                                        <span className="text-gray-600">Brand mismatch:</span>
+                                                        <span className="font-semibold">{stats.removedByReason.brandMismatch}</span>
+                                                    </div>
+                                                    <div className="flex justify-between">
+                                                        <span className="text-gray-600">Invalid pattern:</span>
+                                                        <span className="font-semibold">{stats.removedByReason.invalidPattern}</span>
+                                                    </div>
+                                                    <div className="flex justify-between col-span-2">
+                                                        <span className="text-gray-600">Wrong category:</span>
+                                                        <span className="font-semibold">{stats.removedByReason.wrongCategory}</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div className="bg-white rounded p-3 mt-4">
+                                                <p className="text-sm text-gray-600">
+                                                    <i className="fas fa-info-circle text-green-600 mr-2"></i>
+                                                    <strong>Clean results include only:</strong> Operational locations with strict brand name matches, valid categories, and no invalid patterns.
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        {/* Download Options */}
+                                        <div className="flex flex-col space-y-3">
+                                            <button
+                                                onClick={() => downloadResults(true)}
+                                                className="w-full bg-green-600 text-white px-6 py-4 rounded-lg hover:bg-green-700 transition-colors text-lg font-semibold shadow-lg"
+                                            >
+                                                <i className="fas fa-sparkles mr-2"></i> Download Clean Results ({cleanedResults.length} locations)
+                                            </button>
+                                            <button
+                                                onClick={() => downloadResults(false)}
+                                                className="w-full bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors"
+                                            >
+                                                <i className="fas fa-database mr-2"></i> Download Raw Results ({results.length} locations)
+                                            </button>
+                                            <button
+                                                onClick={resetApp}
+                                                className="w-full bg-gray-200 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-300 transition-colors"
+                                            >
+                                                <i className="fas fa-redo mr-2"></i> Start New Scraping
+                                            </button>
+                                        </div>
                                     </div>
-                                </div>
-                            )}
+                                );
+                            })()}
                         </div>
 
                         {/* Footer */}
