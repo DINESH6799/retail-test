@@ -418,7 +418,7 @@ app.get('/api/status/:sessionId', async (req, res) => {
     }
 });
 
-// GET RESULTS
+// GET RESULTS (with batched fetching to handle 1000+ rows)
 app.get('/api/results/:sessionId', async (req, res) => {
     const { sessionId } = req.params;
 
@@ -427,6 +427,7 @@ app.get('/api/results/:sessionId', async (req, res) => {
     }
 
     try {
+        // Fetch session
         const { data: session, error: sessionError } = await supabase
             .from('scraping_sessions')
             .select('*')
@@ -437,26 +438,56 @@ app.get('/api/results/:sessionId', async (req, res) => {
             return res.status(404).json({ error: 'Session not found' });
         }
 
-        // Fetch ALL results by setting a high limit
-        // Supabase default is 1000, we need to override it
-        const { data: results, error: resultsError } = await supabase
-            .from('scraping_results')
-            .select('*')
-            .eq('session_id', sessionId)
-            .order('created_at', { ascending: true })
-            .limit(100000); // Set high limit to get all results
+        console.log(`📊 Fetching results for session ${sessionId}...`);
+        console.log(`   Expected: ${session.total_results} results`);
 
-        if (resultsError) {
-            console.error('Error fetching results:', resultsError);
-            return res.status(500).json({ error: 'Failed to fetch results' });
+        // Fetch ALL results in batches to avoid Supabase limits
+        let allResults = [];
+        let from = 0;
+        const batchSize = 1000;
+        let hasMore = true;
+        let batchCount = 0;
+
+        while (hasMore) {
+            batchCount++;
+            console.log(`   Fetching batch ${batchCount} (rows ${from} to ${from + batchSize - 1})...`);
+
+            const { data, error } = await supabase
+                .from('scraping_results')
+                .select('*')
+                .eq('session_id', sessionId)
+                .order('created_at', { ascending: true })
+                .range(from, from + batchSize - 1);
+
+            if (error) {
+                console.error(`   ❌ Error fetching batch ${batchCount}:`, error);
+                break;
+            }
+
+            if (data && data.length > 0) {
+                allResults = allResults.concat(data);
+                console.log(`   ✅ Batch ${batchCount}: Got ${data.length} rows (total so far: ${allResults.length})`);
+                from += batchSize;
+                hasMore = data.length === batchSize; // If less than batch size, we're done
+            } else {
+                hasMore = false;
+            }
+
+            // Safety limit to prevent infinite loops
+            if (batchCount > 100) {
+                console.warn('   ⚠️  Stopped at 100 batches (100,000 rows)');
+                break;
+            }
         }
 
-        console.log(`📊 Fetched ${results?.length || 0} results for session ${sessionId}`);
+        console.log(`✅ Total fetched: ${allResults.length} results for session ${sessionId}`);
 
         res.json({
             session: session,
-            results: results || [],
-            totalCost: session.total_cost
+            results: allResults,
+            totalCost: session.total_cost,
+            fetchedCount: allResults.length,
+            expectedCount: session.total_results
         });
 
     } catch (error) {
