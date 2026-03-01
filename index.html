@@ -707,6 +707,10 @@
 // ============================================================================
 // Replace lines 708-793 in your index.html with this entire section
 
+// ============================================================================
+// ENHANCED CLEANING LOGIC - Options 1, 2, 5
+// ============================================================================
+
 // Cleanup polling
 useEffect(() => {
     return () => {
@@ -716,10 +720,10 @@ useEffect(() => {
 
 
 // ============================================================================
-// SIMPLE BRAND MATCHING - Case-insensitive substring
+// OPTION 1: TIGHTER BRAND MATCHING - With context checking
 // ============================================================================
 
-const isValidBrand = (scrapedName, brandName) => {
+const isValidBrandWithContext = (scrapedName, brandName) => {
     if (!scrapedName || !brandName) return false;
     
     // Convert both to lowercase for case-insensitive comparison
@@ -731,7 +735,64 @@ const isValidBrand = (scrapedName, brandName) => {
     const cleanBrand = brand.replace(/[&'.-]/g, '');
     
     // Simple substring check - brand name appears anywhere in scraped name
-    return cleanName.includes(cleanBrand);
+    if (!cleanName.includes(cleanBrand)) {
+        return false;
+    }
+    
+    // OPTION 1: Context checking - exclude bad contexts
+    const badContexts = [
+        'hospital', 'clinic', 'medical center',
+        'cement', 'steel', 'construction',
+        'real estate', 'realty', 'properties'
+    ];
+    
+    // If brand matches but has bad context, reject
+    for (const badContext of badContexts) {
+        if (cleanName.includes(badContext)) {
+            return false;
+        }
+    }
+    
+    return true;
+};
+
+// ============================================================================
+// OPTION 2: ADDRESS QUALITY SCORING
+// ============================================================================
+
+const getAddressQualityScore = (address) => {
+    if (!address) return 0;
+    
+    let score = 50; // Base score
+    
+    // Has building/shop number
+    if (/\d+/.test(address)) score += 10;
+    
+    // Has landmark keywords
+    const landmarks = ['near', 'opposite', 'beside', 'next to', 'mall', 'complex', 'market'];
+    if (landmarks.some(word => address.toLowerCase().includes(word))) score += 5;
+    
+    // Has locality/area name (capitalized words)
+    const capitalWords = address.match(/[A-Z][a-z]+/g) || [];
+    if (capitalWords.length >= 2) score += 10;
+    
+    // Has pincode
+    if (/\b\d{6}\b/.test(address)) score += 15;
+    
+    // Has city/state name
+    if (/india|mumbai|delhi|bangalore|chennai|kolkata|hyderabad|pune/i.test(address)) score += 10;
+    
+    // Penalize generic addresses
+    if (/^unknown|^na|^not available|^n\/a/i.test(address)) score -= 50;
+    
+    // Penalize very short addresses
+    if (address.length < 20) score -= 20;
+    
+    return Math.max(0, Math.min(100, score));
+};
+
+const hasGoodAddressQuality = (address, minScore = 40) => {
+    return getAddressQualityScore(address) >= minScore;
 };
 
 // ============================================================================
@@ -777,21 +838,59 @@ const isLikelyRetailLocation = (name, address) => {
 };
 
 // ============================================================================
-// REMOVE DUPLICATES
+// OPTION 5: IMPROVED DUPLICATE DETECTION
 // ============================================================================
 
-const removeDuplicates = (results) => {
-    const seen = new Set();
+const calculateDistance = (lat1, lon1, lat2, lon2) => {
+    const R = 6371000; // Earth's radius in meters
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c; // Distance in meters
+};
+
+const nameSimilarity = (name1, name2) => {
+    const n1 = name1.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const n2 = name2.toLowerCase().replace(/[^a-z0-9]/g, '');
+    
+    // Simple character overlap check
+    const shorter = n1.length < n2.length ? n1 : n2;
+    const longer = n1.length >= n2.length ? n1 : n2;
+    
+    return longer.includes(shorter);
+};
+
+const removeDuplicatesEnhanced = (results) => {
     const unique = [];
     
     for (const result of results) {
-        // Round coordinates to 4 decimal places (~11 meters precision)
-        const lat = result.latitude.toFixed(4);
-        const lng = result.longitude.toFixed(4);
-        const key = `${result.search_brand}-${lat}-${lng}`;
+        let isDuplicate = false;
         
-        if (!seen.has(key)) {
-            seen.add(key);
+        for (const existing of unique) {
+            // Same brand only
+            if (existing.search_brand !== result.search_brand) {
+                continue;
+            }
+            
+            // Check distance
+            const distance = calculateDistance(
+                existing.latitude,
+                existing.longitude,
+                result.latitude,
+                result.longitude
+            );
+            
+            // OPTION 5: Enhanced - Check both distance AND name similarity
+            if (distance < 50 && nameSimilarity(existing.name, result.name)) {
+                isDuplicate = true;
+                break;
+            }
+        }
+        
+        if (!isDuplicate) {
             unique.push(result);
         }
     }
@@ -800,11 +899,11 @@ const removeDuplicates = (results) => {
 };
 
 // ============================================================================
-// MAIN CLEANING FUNCTION
+// MAIN ENHANCED CLEANING FUNCTION
 // ============================================================================
 
-const cleanResultsSimple = (rawResults) => {
-    console.log(`🧹 Starting simple cleaning...`);
+const cleanResultsEnhanced = (rawResults) => {
+    console.log(`🧹 Starting enhanced cleaning...`);
     console.log(`   Input: ${rawResults.length} locations`);
     
     let cleaned = rawResults;
@@ -817,19 +916,23 @@ const cleanResultsSimple = (rawResults) => {
     cleaned = cleaned.filter(isOperational);
     console.log(`   After operational check: ${cleaned.length}`);
     
-    // Step 3: Brand name must match (case-insensitive substring)
-    cleaned = cleaned.filter(r => isValidBrand(r.name, r.search_brand));
-    console.log(`   After brand match: ${cleaned.length}`);
+    // Step 3: OPTION 1 - Brand match with context checking
+    cleaned = cleaned.filter(r => isValidBrandWithContext(r.name, r.search_brand));
+    console.log(`   After brand match (with context): ${cleaned.length}`);
     
     // Step 4: Must be likely retail location
     cleaned = cleaned.filter(r => isLikelyRetailLocation(r.name, r.address));
     console.log(`   After retail check: ${cleaned.length}`);
     
-    // Step 5: Remove duplicates
-    cleaned = removeDuplicates(cleaned);
-    console.log(`   After dedup: ${cleaned.length}`);
+    // Step 5: OPTION 2 - Address quality check
+    cleaned = cleaned.filter(r => hasGoodAddressQuality(r.address, 40));
+    console.log(`   After address quality: ${cleaned.length}`);
     
-    console.log(`✅ Cleaning complete!`);
+    // Step 6: OPTION 5 - Enhanced duplicate removal
+    cleaned = removeDuplicatesEnhanced(cleaned);
+    console.log(`   After enhanced dedup: ${cleaned.length}`);
+    
+    console.log(`✅ Enhanced cleaning complete!`);
     console.log(`   Kept: ${cleaned.length} / ${rawResults.length} (${Math.round(cleaned.length/rawResults.length*100)}%)`);
     
     return cleaned;
@@ -839,12 +942,11 @@ const cleanResultsSimple = (rawResults) => {
 // CLEANING STATS FOR UI
 // ============================================================================
 
-const getSimpleCleaningStats = (rawResults, cleanedResults) => {
+const getEnhancedCleaningStats = (rawResults, cleanedResults) => {
     const total = rawResults.length;
     const kept = cleanedResults.length;
     const removed = total - kept;
     
-    // Count removals by reason
     const stats = {
         total: total,
         cleaned: kept,
@@ -853,8 +955,9 @@ const getSimpleCleaningStats = (rawResults, cleanedResults) => {
         removedByReason: {
             missingData: rawResults.filter(r => !hasRequiredData(r)).length,
             notOperational: rawResults.filter(r => !isOperational(r)).length,
-            brandMismatch: rawResults.filter(r => !isValidBrand(r.name, r.search_brand)).length,
+            brandMismatch: rawResults.filter(r => !isValidBrandWithContext(r.name, r.search_brand)).length,
             nonRetail: rawResults.filter(r => !isLikelyRetailLocation(r.name, r.address)).length,
+            lowAddressQuality: rawResults.filter(r => !hasGoodAddressQuality(r.address, 40)).length,
             duplicates: 0
         }
     };
@@ -863,8 +966,9 @@ const getSimpleCleaningStats = (rawResults, cleanedResults) => {
     const beforeDedup = rawResults.filter(r => 
         hasRequiredData(r) && 
         isOperational(r) && 
-        isValidBrand(r.name, r.search_brand) &&
-        isLikelyRetailLocation(r.name, r.address)
+        isValidBrandWithContext(r.name, r.search_brand) &&
+        isLikelyRetailLocation(r.name, r.address) &&
+        hasGoodAddressQuality(r.address, 40)
     ).length;
     
     stats.removedByReason.duplicates = beforeDedup - kept;
@@ -877,20 +981,19 @@ const getSimpleCleaningStats = (rawResults, cleanedResults) => {
 // ============================================================================
 
 const cleanResults = (rawResults) => {
-    return cleanResultsSimple(rawResults);
+    return cleanResultsEnhanced(rawResults);
 };
 
 const getCleaningStats = (raw, clean) => {
-    return getSimpleCleaningStats(raw, clean);
+    return getEnhancedCleaningStats(raw, clean);
 };
 
 // ============================================================================
 // CONTINUE WITH REST OF YOUR CODE...
 // ============================================================================
 
-const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
-    city.toLowerCase().includes(citySearch.toLowerCase())
-);
+
+
 
 
             const handleFileUpload = (e) => {
@@ -1144,7 +1247,7 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                     
                     const dataToDownload = useClean ? cleanResults(data.results) : data.results;
                     
-                    const headers = ['brand', 'sku', 'category', 'gmaps_category', 'name', 'address', 'latitude', 'longitude', 'business_status', 'gmaps_url', 'is_brand_match'];
+                    const headers = ['brand', 'sku', 'category', 'gmaps_category', 'name', 'address', 'latitude', 'longitude', 'business_status', 'gmaps_url', 'is_brand_match', 'rating', 'reviews', 'price_level'];
                     const csvContent = [
                         headers.join(','),
                         ...dataToDownload.map(row => [
@@ -1158,7 +1261,10 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                             row.longitude,
                             row.business_status,
                             row.gmaps_url,
-                            row.is_brand_match
+                            row.is_brand_match,
+                            row.rating || '',
+                            row.user_ratings_total || '',
+                            row.price_level || ''
                         ].join(','))
                     ].join('\n');
 
@@ -1679,3 +1785,8 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
     </script>
 </body>
 </html>
+
+
+const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
+    city.toLowerCase().includes(citySearch.toLowerCase())
+);
