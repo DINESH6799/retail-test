@@ -697,104 +697,204 @@
                 setPollingInterval(interval);
             };
 
-            // Cleanup polling
-            useEffect(() => {
-                return () => {
-                    if (pollingInterval) clearInterval(pollingInterval);
-                };
-            }, [pollingInterval]);
+            // ============================================================================
+// 🧹 SIMPLE MVP CLEANING - READY TO PASTE INTO index.html
+// ============================================================================
+// Replace lines 708-793 in your index.html with this entire section
+
+// ============================================================================
+// 🧹 SIMPLE MVP CLEANING - READY TO PASTE INTO index.html
+// ============================================================================
+// Replace lines 708-793 in your index.html with this entire section
+
+// Cleanup polling
+useEffect(() => {
+    return () => {
+        if (pollingInterval) clearInterval(pollingInterval);
+    };
+}, [pollingInterval]);
 
 
-            // Cleaning function - strict brand name matching
-            const isStrictBrandMatch = (locationName, brandName) => {
-                if (!locationName || !brandName) return false;
-                
-                const name = locationName.toLowerCase().trim();
-                const brand = brandName.toLowerCase().trim();
-                
-                // Exact match or brand at start of name
-                if (name === brand || name.startsWith(brand + ' ')) return true;
-                
-                // Brand with common suffixes
-                const validSuffixes = ['store', 'outlet', 'shop', 'showroom', 'retail', 'factory'];
-                for (const suffix of validSuffixes) {
-                    if (name === `${brand} ${suffix}` || name === `${brand}-${suffix}`) {
-                        return true;
-                    }
-                }
-                
-                // Check if brand is a complete word in the name (not part of another word)
-                const words = name.split(/\s+/);
-                return words.includes(brand);
-            };
+// ============================================================================
+// SIMPLE BRAND MATCHING - Case-insensitive substring
+// ============================================================================
 
-            // Check if location name contains invalid patterns
-            const hasInvalidPattern = (name) => {
-                if (!name) return true;
-                return INVALID_PATTERNS.some(pattern => pattern.test(name));
-            };
+const isValidBrand = (scrapedName, brandName) => {
+    if (!scrapedName || !brandName) return false;
+    
+    // Convert both to lowercase for case-insensitive comparison
+    const name = scrapedName.toLowerCase().trim();
+    const brand = brandName.toLowerCase().trim();
+    
+    // Remove common punctuation that might differ
+    const cleanName = name.replace(/[&'.-]/g, '');
+    const cleanBrand = brand.replace(/[&'.-]/g, '');
+    
+    // Simple substring check - brand name appears anywhere in scraped name
+    return cleanName.includes(cleanBrand);
+};
 
-            // Check if category is valid for brand category
-            const isValidCategory = (gmapsCategory, brandCategory) => {
-                if (!gmapsCategory || !brandCategory) return false;
-                
-                const allowedCategories = CATEGORY_FILTERS[brandCategory] || [];
-                return allowedCategories.some(cat => 
-                    gmapsCategory.toLowerCase().includes(cat.toLowerCase())
-                );
-            };
+// ============================================================================
+// BASIC DATA VALIDATION
+// ============================================================================
 
-            // Main cleaning function
-            const cleanResults = (rawResults) => {
-                return rawResults.filter(result => {
-                    // 1. Must have required data
-                    if (!result.name || !result.address || !result.latitude || !result.longitude) {
-                        return false;
-                    }
+const hasRequiredData = (result) => {
+    return !!(
+        result.name && 
+        result.address && 
+        result.latitude && 
+        result.longitude
+    );
+};
 
-                    // 2. Must be operational
-                    if (result.business_status !== 'OPERATIONAL') {
-                        return false;
-                    }
+// ============================================================================
+// OPERATIONAL STATUS CHECK
+// ============================================================================
 
-                    // 3. Strict brand name matching
-                    if (!isStrictBrandMatch(result.name, result.search_brand)) {
-                        return false;
-                    }
+const isOperational = (result) => {
+    return result.business_status === 'OPERATIONAL';
+};
 
-                    // 4. No invalid patterns in name
-                    if (hasInvalidPattern(result.name)) {
-                        return false;
-                    }
+// ============================================================================
+// REMOVE NON-RETAIL LOCATIONS
+// ============================================================================
 
-                    // 5. Valid category for brand type
-                    if (!isValidCategory(result.gmaps_category, result.search_category)) {
-                        return false;
-                    }
+const isLikelyRetailLocation = (name, address) => {
+    if (!name) return false;
+    
+    const combinedText = `${name} ${address || ''}`.toLowerCase();
+    
+    // Exclude obvious non-retail keywords
+    const excludeKeywords = [
+        'hospital', 'clinic', 'medical',
+        'school', 'college', 'university',
+        'atm', 'bank branch',
+        'parking', 'bus stop', 'metro station',
+        'government', 'municipal', 'office'
+    ];
+    
+    return !excludeKeywords.some(keyword => combinedText.includes(keyword));
+};
 
-                    return true;
-                });
-            };
+// ============================================================================
+// REMOVE DUPLICATES
+// ============================================================================
 
-            // Get cleaning stats
-            const getCleaningStats = (raw, clean) => {
-                return {
-                    total: raw.length,
-                    cleaned: clean.length,
-                    removed: raw.length - clean.length,
-                    removedByReason: {
-                        missingData: raw.filter(r => !r.name || !r.address || !r.latitude || !r.longitude).length,
-                        notOperational: raw.filter(r => r.business_status !== 'OPERATIONAL').length,
-                        brandMismatch: raw.filter(r => !isStrictBrandMatch(r.name, r.search_brand)).length,
-                        invalidPattern: raw.filter(r => hasInvalidPattern(r.name)).length,
-                        wrongCategory: raw.filter(r => !isValidCategory(r.gmaps_category, r.search_category)).length
-                    }
-                };
-            };
+const removeDuplicates = (results) => {
+    const seen = new Set();
+    const unique = [];
+    
+    for (const result of results) {
+        // Round coordinates to 4 decimal places (~11 meters precision)
+        const lat = result.latitude.toFixed(4);
+        const lng = result.longitude.toFixed(4);
+        const key = `${result.search_brand}-${lat}-${lng}`;
+        
+        if (!seen.has(key)) {
+            seen.add(key);
+            unique.push(result);
+        }
+    }
+    
+    return unique;
+};
 
-            const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
-                city.toLowerCase().includes(citySearch.toLowerCase())
-            );
+// ============================================================================
+// MAIN CLEANING FUNCTION
+// ============================================================================
+
+const cleanResultsSimple = (rawResults) => {
+    console.log(`🧹 Starting simple cleaning...`);
+    console.log(`   Input: ${rawResults.length} locations`);
+    
+    let cleaned = rawResults;
+    
+    // Step 1: Must have required data
+    cleaned = cleaned.filter(hasRequiredData);
+    console.log(`   After data check: ${cleaned.length}`);
+    
+    // Step 2: Must be operational
+    cleaned = cleaned.filter(isOperational);
+    console.log(`   After operational check: ${cleaned.length}`);
+    
+    // Step 3: Brand name must match (case-insensitive substring)
+    cleaned = cleaned.filter(r => isValidBrand(r.name, r.search_brand));
+    console.log(`   After brand match: ${cleaned.length}`);
+    
+    // Step 4: Must be likely retail location
+    cleaned = cleaned.filter(r => isLikelyRetailLocation(r.name, r.address));
+    console.log(`   After retail check: ${cleaned.length}`);
+    
+    // Step 5: Remove duplicates
+    cleaned = removeDuplicates(cleaned);
+    console.log(`   After dedup: ${cleaned.length}`);
+    
+    console.log(`✅ Cleaning complete!`);
+    console.log(`   Kept: ${cleaned.length} / ${rawResults.length} (${Math.round(cleaned.length/rawResults.length*100)}%)`);
+    
+    return cleaned;
+};
+
+// ============================================================================
+// CLEANING STATS FOR UI
+// ============================================================================
+
+const getSimpleCleaningStats = (rawResults, cleanedResults) => {
+    const total = rawResults.length;
+    const kept = cleanedResults.length;
+    const removed = total - kept;
+    
+    // Count removals by reason
+    const stats = {
+        total: total,
+        cleaned: kept,
+        removed: removed,
+        retentionRate: Math.round((kept / total) * 100),
+        removedByReason: {
+            missingData: rawResults.filter(r => !hasRequiredData(r)).length,
+            notOperational: rawResults.filter(r => !isOperational(r)).length,
+            brandMismatch: rawResults.filter(r => !isValidBrand(r.name, r.search_brand)).length,
+            nonRetail: rawResults.filter(r => !isLikelyRetailLocation(r.name, r.address)).length,
+            duplicates: 0
+        }
+    };
+    
+    // Calculate duplicates
+    const beforeDedup = rawResults.filter(r => 
+        hasRequiredData(r) && 
+        isOperational(r) && 
+        isValidBrand(r.name, r.search_brand) &&
+        isLikelyRetailLocation(r.name, r.address)
+    ).length;
+    
+    stats.removedByReason.duplicates = beforeDedup - kept;
+    
+    return stats;
+};
+
+// ============================================================================
+// WRAPPER FUNCTIONS (keep your existing function names)
+// ============================================================================
+
+const cleanResults = (rawResults) => {
+    return cleanResultsSimple(rawResults);
+};
+
+const getCleaningStats = (raw, clean) => {
+    return getSimpleCleaningStats(raw, clean);
+};
+
+// ============================================================================
+// CONTINUE WITH REST OF YOUR CODE...
+// ============================================================================
+
+const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
+    city.toLowerCase().includes(citySearch.toLowerCase())
+);
+const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
+    city.toLowerCase().includes(citySearch.toLowerCase())
+);
+
 
             const handleFileUpload = (e) => {
                 const file = e.target.files[0];
