@@ -232,7 +232,10 @@ async function runScrapingInBackground(sessionId, brands, cityBounds, cityCenter
                             business_status: place.business_status || '',
                             gmaps_url: `https://www.google.com/maps/place/?q=place_id=${placeId}`,
                             place_id: placeId,
-                            is_brand_match: (place.name || '').toLowerCase().includes(brand.brand.toLowerCase())
+                            is_brand_match: (place.name || '').toLowerCase().includes(brand.brand.toLowerCase()),
+                            rating: place.rating || null,
+                            user_ratings_total: place.user_ratings_total || null,
+                            price_level: place.price_level || null
                         });
                     }
 
