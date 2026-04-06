@@ -13,11 +13,20 @@
 <body>
     <div id="root"></div>
 
+    <script src="./cleaner_model_artifact.js"></script>
+    <script src="./cleaner_core.js"></script>
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
-        // Backend API URL - change this to your deployed backend URL
-        const API_URL = 'https://retail-test-b54d.onrender.com';
+        // Backend API URL - use local backend automatically when opened locally
+        const isLocalHost = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+        const API_URL = isLocalHost
+            ? 'http://localhost:3001'
+            : 'https://retail-test-b54d.onrender.com';
+        const SCRAPE_GRID_SPACING_KM = 10;
+        const MAX_CALLS_PER_GRID_POINT = 3;
+        const APPROX_REQUEST_COST_INR = 17 / 1000;
+        const COST_LIMIT_INR = 20000;
 
         // Category-based filtering rules
         const CATEGORY_FILTERS = {
@@ -589,10 +598,18 @@
             const [isScraping, setIsScraping] = useState(false);
             const [progress, setProgress] = useState({ current: 0, total: 0, message: '' });
             const [results, setResults] = useState([]);
-            const [estimatedCost, setEstimatedCost] = useState(0);
+            const [estimateDetails, setEstimateDetails] = useState({
+                gridPoints: 0,
+                minCalls: 0,
+                maxCalls: 0,
+                minCost: 0,
+                maxCost: 0
+            });
             const [actualCost, setActualCost] = useState(0);
             const [sessionId, setSessionId] = useState(null);
             const [pollingInterval, setPollingInterval] = useState(null);
+            const [elapsedSeconds, setElapsedSeconds] = useState(0);
+            const [dragActive, setDragActive] = useState(false);
 
             const fileInputRef = useRef(null);
 
@@ -720,273 +737,23 @@ useEffect(() => {
 
 
 // ============================================================================
-// OPTION 1: TIGHTER BRAND MATCHING - With context checking
-// ============================================================================
-
-const isValidBrandWithContext = (scrapedName, brandName) => {
-    if (!scrapedName || !brandName) return false;
-    
-    // Convert both to lowercase for case-insensitive comparison
-    const name = scrapedName.toLowerCase().trim();
-    const brand = brandName.toLowerCase().trim();
-    
-    // Remove common punctuation that might differ
-    const cleanName = name.replace(/[&'.-]/g, '');
-    const cleanBrand = brand.replace(/[&'.-]/g, '');
-    
-    // Simple substring check - brand name appears anywhere in scraped name
-    if (!cleanName.includes(cleanBrand)) {
-        return false;
-    }
-    
-    // OPTION 1: Context checking - exclude bad contexts
-    const badContexts = [
-        'hospital', 'clinic', 'medical center',
-        'cement', 'steel', 'construction',
-        'real estate', 'realty', 'properties'
-    ];
-    
-    // If brand matches but has bad context, reject
-    for (const badContext of badContexts) {
-        if (cleanName.includes(badContext)) {
-            return false;
-        }
-    }
-    
-    return true;
-};
-
-// ============================================================================
-// OPTION 2: ADDRESS QUALITY SCORING
-// ============================================================================
-
-const getAddressQualityScore = (address) => {
-    if (!address) return 0;
-    
-    let score = 50; // Base score
-    
-    // Has building/shop number
-    if (/\d+/.test(address)) score += 10;
-    
-    // Has landmark keywords
-    const landmarks = ['near', 'opposite', 'beside', 'next to', 'mall', 'complex', 'market'];
-    if (landmarks.some(word => address.toLowerCase().includes(word))) score += 5;
-    
-    // Has locality/area name (capitalized words)
-    const capitalWords = address.match(/[A-Z][a-z]+/g) || [];
-    if (capitalWords.length >= 2) score += 10;
-    
-    // Has pincode
-    if (/\b\d{6}\b/.test(address)) score += 15;
-    
-    // Has city/state name
-    if (/india|mumbai|delhi|bangalore|chennai|kolkata|hyderabad|pune/i.test(address)) score += 10;
-    
-    // Penalize generic addresses
-    if (/^unknown|^na|^not available|^n\/a/i.test(address)) score -= 50;
-    
-    // Penalize very short addresses
-    if (address.length < 20) score -= 20;
-    
-    return Math.max(0, Math.min(100, score));
-};
-
-const hasGoodAddressQuality = (address, minScore = 40) => {
-    return getAddressQualityScore(address) >= minScore;
-};
-
-// ============================================================================
-// BASIC DATA VALIDATION
-// ============================================================================
-
-const hasRequiredData = (result) => {
-    return !!(
-        result.name && 
-        result.address && 
-        result.latitude && 
-        result.longitude
-    );
-};
-
-// ============================================================================
-// OPERATIONAL STATUS CHECK
-// ============================================================================
-
-const isOperational = (result) => {
-    return result.business_status === 'OPERATIONAL';
-};
-
-// ============================================================================
-// REMOVE NON-RETAIL LOCATIONS
-// ============================================================================
-
-const isLikelyRetailLocation = (name, address) => {
-    if (!name) return false;
-    
-    const combinedText = `${name} ${address || ''}`.toLowerCase();
-    
-    // Exclude obvious non-retail keywords
-    const excludeKeywords = [
-        'hospital', 'clinic', 'medical',
-        'school', 'college', 'university',
-        'atm', 'bank branch',
-        'parking', 'bus stop', 'metro station',
-        'government', 'municipal', 'office'
-    ];
-    
-    return !excludeKeywords.some(keyword => combinedText.includes(keyword));
-};
-
-// ============================================================================
-// OPTION 5: IMPROVED DUPLICATE DETECTION
-// ============================================================================
-
-const calculateDistance = (lat1, lon1, lat2, lon2) => {
-    const R = 6371000; // Earth's radius in meters
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-              Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R * c; // Distance in meters
-};
-
-const nameSimilarity = (name1, name2) => {
-    const n1 = name1.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const n2 = name2.toLowerCase().replace(/[^a-z0-9]/g, '');
-    
-    // Simple character overlap check
-    const shorter = n1.length < n2.length ? n1 : n2;
-    const longer = n1.length >= n2.length ? n1 : n2;
-    
-    return longer.includes(shorter);
-};
-
-const removeDuplicatesEnhanced = (results) => {
-    const unique = [];
-    
-    for (const result of results) {
-        let isDuplicate = false;
-        
-        for (const existing of unique) {
-            // Same brand only
-            if (existing.search_brand !== result.search_brand) {
-                continue;
-            }
-            
-            // Check distance
-            const distance = calculateDistance(
-                existing.latitude,
-                existing.longitude,
-                result.latitude,
-                result.longitude
-            );
-            
-            // OPTION 5: Enhanced - Check both distance AND name similarity
-            if (distance < 50 && nameSimilarity(existing.name, result.name)) {
-                isDuplicate = true;
-                break;
-            }
-        }
-        
-        if (!isDuplicate) {
-            unique.push(result);
-        }
-    }
-    
-    return unique;
-};
-
-// ============================================================================
-// MAIN ENHANCED CLEANING FUNCTION
+// SHARED CLEANER WRAPPERS
 // ============================================================================
 
 const cleanResultsEnhanced = (rawResults) => {
     console.log(`🧹 Starting enhanced cleaning...`);
-    console.log(`   Input: ${rawResults.length} locations`);
-    
-    let cleaned = rawResults;
-    
-    // Step 1: Must have required data
-    cleaned = cleaned.filter(hasRequiredData);
-    console.log(`   After data check: ${cleaned.length}`);
-    
-    // Step 2: Must be operational
-    cleaned = cleaned.filter(isOperational);
-    console.log(`   After operational check: ${cleaned.length}`);
-    
-    // Step 3: OPTION 1 - Brand match with context checking
-    cleaned = cleaned.filter(r => isValidBrandWithContext(r.name, r.search_brand));
-    console.log(`   After brand match (with context): ${cleaned.length}`);
-    
-    // Step 4: Must be likely retail location
-    cleaned = cleaned.filter(r => isLikelyRetailLocation(r.name, r.address));
-    console.log(`   After retail check: ${cleaned.length}`);
-    
-    // Step 5: OPTION 2 - Address quality check
-    cleaned = cleaned.filter(r => hasGoodAddressQuality(r.address, 40));
-    console.log(`   After address quality: ${cleaned.length}`);
-    
-    // Step 6: OPTION 5 - Enhanced duplicate removal
-    cleaned = removeDuplicatesEnhanced(cleaned);
-    console.log(`   After enhanced dedup: ${cleaned.length}`);
-    
+    const cleaned = window.BrandCleaner.cleanResults(rawResults);
     console.log(`✅ Enhanced cleaning complete!`);
-    console.log(`   Kept: ${cleaned.length} / ${rawResults.length} (${Math.round(cleaned.length/rawResults.length*100)}%)`);
-    
+    console.log(`   Kept: ${cleaned.length} / ${rawResults.length}`);
     return cleaned;
 };
 
-// ============================================================================
-// CLEANING STATS FOR UI
-// ============================================================================
-
 const getEnhancedCleaningStats = (rawResults, cleanedResults) => {
-    const total = rawResults.length;
-    const kept = cleanedResults.length;
-    const removed = total - kept;
-    
-    const stats = {
-        total: total,
-        cleaned: kept,
-        removed: removed,
-        retentionRate: Math.round((kept / total) * 100),
-        removedByReason: {
-            missingData: rawResults.filter(r => !hasRequiredData(r)).length,
-            notOperational: rawResults.filter(r => !isOperational(r)).length,
-            brandMismatch: rawResults.filter(r => !isValidBrandWithContext(r.name, r.search_brand)).length,
-            nonRetail: rawResults.filter(r => !isLikelyRetailLocation(r.name, r.address)).length,
-            lowAddressQuality: rawResults.filter(r => !hasGoodAddressQuality(r.address, 40)).length,
-            duplicates: 0
-        }
-    };
-    
-    // Calculate duplicates
-    const beforeDedup = rawResults.filter(r => 
-        hasRequiredData(r) && 
-        isOperational(r) && 
-        isValidBrandWithContext(r.name, r.search_brand) &&
-        isLikelyRetailLocation(r.name, r.address) &&
-        hasGoodAddressQuality(r.address, 40)
-    ).length;
-    
-    stats.removedByReason.duplicates = beforeDedup - kept;
-    
-    return stats;
+    return window.BrandCleaner.getCleaningStats(rawResults, cleanedResults);
 };
 
-// ============================================================================
-// WRAPPER FUNCTIONS (keep your existing function names)
-// ============================================================================
-
-const cleanResults = (rawResults) => {
-    return cleanResultsEnhanced(rawResults);
-};
-
-const getCleaningStats = (raw, clean) => {
-    return getEnhancedCleaningStats(raw, clean);
-};
+const cleanResults = (rawResults) => window.BrandCleaner.cleanResults(rawResults);
+const getCleaningStats = (rawResults, cleanedResults) => window.BrandCleaner.getCleaningStats(rawResults, cleanedResults);
 
 // ============================================================================
 // CONTINUE WITH REST OF YOUR CODE...
@@ -1001,16 +768,11 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
 
 
 
-            const handleFileUpload = (e) => {
-                const file = e.target.files[0];
-                if (!file) return;
-
+            const parseBrandsFile = (file) => {
                 const reader = new FileReader();
                 reader.onload = (event) => {
                     const text = event.target.result;
                     const lines = text.split('\n').filter(line => line.trim());
-                    const headers = lines[0].split(',').map(h => h.trim());
-                    
                     const parsedBrands = lines.slice(1).map(line => {
                         const values = line.split(',').map(v => v.trim());
                         return {
@@ -1026,6 +788,39 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                 reader.readAsText(file);
             };
 
+            const handleFileUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                parseBrandsFile(file);
+            };
+
+            const handleDrop = (e) => {
+                e.preventDefault();
+                setDragActive(false);
+                const file = e.dataTransfer.files?.[0];
+                if (!file) return;
+                parseBrandsFile(file);
+            };
+
+            const downloadSampleCsv = () => {
+                const sample = [
+                    'brand,sku,category',
+                    'Zudio,Elite,Apparel',
+                    'Apollo Pharmacy,Pro,Pharmacy',
+                    "Domino's Pizza,Elite,F&B"
+                ].join('\n');
+
+                const blob = new Blob([sample], { type: 'text/csv' });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'sample_brands_template.csv';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+            };
+
             const calculateEstimatedCost = () => {
                 if (!selectedCity || brands.length === 0) return;
 
@@ -1033,7 +828,7 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                 const bounds = cityData.bounds;
                 
                 // Calculate grid points
-                const gridSpacing = 20; // km - FASTEST scraping (3-4 hours)
+                const gridSpacing = SCRAPE_GRID_SPACING_KM;
                 const latDegPerKm = 1 / 110.574;
                 const lngDegPerKm = 1 / (111.320 * Math.cos(cityData.center[0] * Math.PI / 180));
                 
@@ -1045,12 +840,16 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                 const totalGridPoints = latPoints * lngPoints;
                 
                 // Estimate API calls
-                const estimatedCalls = brands.length * totalGridPoints;
-                // Places API Nearby Search: ₹17 per 1000 calls
-                const costPerCall = 17 / 1000;
-                const estimated = estimatedCalls * costPerCall;
-                
-                setEstimatedCost(estimated);
+                const minCalls = brands.length * totalGridPoints;
+                const maxCalls = minCalls * MAX_CALLS_PER_GRID_POINT;
+
+                setEstimateDetails({
+                    gridPoints: totalGridPoints,
+                    minCalls,
+                    maxCalls,
+                    minCost: minCalls * APPROX_REQUEST_COST_INR,
+                    maxCost: maxCalls * APPROX_REQUEST_COST_INR
+                });
             };
 
             useEffect(() => {
@@ -1058,6 +857,40 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                     calculateEstimatedCost();
                 }
             }, [selectedCity, brands]);
+
+            useEffect(() => {
+                if (!isScraping && step !== 5) {
+                    return;
+                }
+
+                const updateElapsed = () => {
+                    const sessionStart = localStorage.getItem('sessionStartTime');
+                    if (!sessionStart) return;
+                    const startedAt = new Date(sessionStart).getTime();
+                    const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+                    setElapsedSeconds(seconds);
+                };
+
+                updateElapsed();
+                const interval = setInterval(updateElapsed, 1000);
+                return () => clearInterval(interval);
+            }, [isScraping, step]);
+
+            const formatDuration = (totalSeconds) => {
+                const hours = Math.floor(totalSeconds / 3600);
+                const minutes = Math.floor((totalSeconds % 3600) / 60);
+                const seconds = totalSeconds % 60;
+
+                if (hours > 0) {
+                    return `${hours}h ${minutes}m`;
+                }
+
+                if (minutes > 0) {
+                    return `${minutes}m ${seconds}s`;
+                }
+
+                return `${seconds}s`;
+            };
 
             const validateApiKey = async () => {
                 setIsValidating(true);
@@ -1076,13 +909,15 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                     });
 
                     console.log('📡 Response status:', response.status);
-                    
-                    if (!response.ok) {
-                        throw new Error(`Server responded with status: ${response.status}`);
-                    }
-
-                    const data = await response.json();
+                    const data = await response.json().catch(() => ({}));
                     console.log('✅ Validation response:', data);
+
+                    if (!response.ok) {
+                        const message = data.error || `Server responded with status: ${response.status}`;
+                        setValidationError(message);
+                        setIsValidating(false);
+                        return false;
+                    }
 
                     if (!data.valid) {
                         setValidationError(data.error);
@@ -1186,8 +1021,8 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                     return;
                 }
 
-                if (estimatedCost > 20000) {
-                    alert(`Estimated cost (₹${estimatedCost.toFixed(2)}) exceeds ₹20,000 limit.`);
+                if (estimateDetails.minCost > COST_LIMIT_INR) {
+                    alert(`Estimated request cost starts above ₹${COST_LIMIT_INR.toLocaleString()}. Please reduce the number of brands or select a smaller city.`);
                     return;
                 }
 
@@ -1235,7 +1070,7 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                 }
             };
 
-            const downloadResults = async (useClean = false) => {
+            const downloadResults = async (mode = 'raw') => {
                 // Don't use state (limited to 1000)! Fetch fresh from backend
                 try {
                     console.log('📥 Fetching ALL results for download...');
@@ -1250,9 +1085,18 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                     
                     console.log(`✅ Fetched ${data.results.length} results for download`);
                     
-                    const dataToDownload = useClean ? cleanResults(data.results) : data.results;
+                    const annotatedResults = window.BrandCleaner.annotateResults(data.results);
+                    const cleanedResultsForDownload = window.BrandCleaner.cleanResults(data.results);
+                    const dataToDownload = mode === 'clean'
+                        ? cleanedResultsForDownload
+                        : mode === 'raw_with_flags'
+                            ? annotatedResults
+                            : data.results;
                     
-                    const headers = ['brand', 'sku', 'category', 'gmaps_category', 'name', 'address', 'latitude', 'longitude', 'business_status', 'gmaps_url', 'is_brand_match', 'rating', 'reviews', 'price_level'];
+                    const includeFlags = mode === 'clean' || mode === 'raw_with_flags';
+                    const headers = includeFlags
+                        ? ['brand', 'sku', 'category', 'gmaps_category', 'name', 'address', 'latitude', 'longitude', 'business_status', 'gmaps_url', 'is_brand_match', 'rating', 'reviews', 'price_level', 'cleaned_status', 'cleaner_confidence', 'cleaner_reason', 'review_flag', 'model_probability']
+                        : ['brand', 'sku', 'category', 'gmaps_category', 'name', 'address', 'latitude', 'longitude', 'business_status', 'gmaps_url', 'is_brand_match', 'rating', 'reviews', 'price_level'];
                     const csvContent = [
                         headers.join(','),
                         ...dataToDownload.map(row => [
@@ -1269,7 +1113,14 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                             row.is_brand_match,
                             row.rating || '',
                             row.user_ratings_total || '',
-                            row.price_level || ''
+                            row.price_level || '',
+                            ...(includeFlags ? [
+                                row.cleaned_status || '',
+                                row.cleaner_confidence || '',
+                                row.cleaner_reason || '',
+                                row.review_flag || '',
+                                row.model_probability || ''
+                            ] : [])
                         ].join(','))
                     ].join('\n');
 
@@ -1277,7 +1128,11 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    const suffix = useClean ? '_CLEAN' : '_RAW';
+                    const suffix = mode === 'clean'
+                        ? '_CLEAN'
+                        : mode === 'raw_with_flags'
+                            ? '_RAW_WITH_FLAGS'
+                            : '_RAW';
                     a.download = `${selectedCity.replace(/\s+/g, '_')}_brand_results${suffix}_${new Date().toISOString().split('T')[0]}.csv`;
                     document.body.appendChild(a);
                     a.click();
@@ -1300,67 +1155,157 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                 setApiKey('');
                 setValidationError('');
                 setResults([]);
-                setEstimatedCost(0);
+                setEstimateDetails({
+                    gridPoints: 0,
+                    minCalls: 0,
+                    maxCalls: 0,
+                    minCost: 0,
+                    maxCost: 0
+                });
                 setActualCost(0);
+                setElapsedSeconds(0);
+                setDragActive(false);
                 setProgress({ current: 0, total: 0, message: '' });
                 if (fileInputRef.current) {
                     fileInputRef.current.value = '';
                 }
             };
 
-            return (
-                <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-8 px-4">
-                    <div className="max-w-4xl mx-auto">
-                        {/* Header */}
-                        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-                            <h1 className="text-3xl font-bold text-gray-800 text-center mb-2">
-                                <i className="fas fa-store mr-3 text-indigo-600"></i>
-                                Retail Brands Scraper for Expansion
-                            </h1>
-                            <p className="text-center text-gray-600">
-                                Discover brand locations across Indian cities using Google Maps API
-                            </p>
-                        </div>
+            const steps = [
+                { num: 1, label: 'Upload Brands', icon: 'fa-upload' },
+                { num: 2, label: 'Select City', icon: 'fa-location-dot' },
+                { num: 3, label: 'API Key', icon: 'fa-key' },
+                { num: 4, label: 'Review', icon: 'fa-circle-check' },
+                { num: 5, label: 'Scraping', icon: 'fa-spinner' },
+                { num: 6, label: 'Download', icon: 'fa-download' }
+            ];
+            const environmentLabel = isLocalHost ? 'Local backend' : 'Production backend';
+            const environmentClasses = isLocalHost
+                ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                : 'bg-slate-100 text-slate-700 border border-slate-200';
+            const progressPercentage = progress.percentage || 0;
+            const expectedDurationMinutes = Math.max(1, Math.ceil(estimateDetails.maxCalls / 180));
 
-                        {/* Progress Steps */}
-                        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-                            <div className="flex items-center justify-between">
-                                {[
-                                    { num: 1, label: 'Upload Brands', icon: 'fa-upload' },
-                                    { num: 2, label: 'Select City', icon: 'fa-map-marker-alt' },
-                                    { num: 3, label: 'API Key', icon: 'fa-key' },
-                                    { num: 4, label: 'Review', icon: 'fa-check-circle' },
-                                    { num: 5, label: 'Scraping', icon: 'fa-spinner' },
-                                    { num: 6, label: 'Download', icon: 'fa-download' }
-                                ].map((s, idx) => (
-                                    <div key={s.num} className="flex items-center">
-                                        <div className={`flex flex-col items-center ${step >= s.num ? 'text-indigo-600' : 'text-gray-400'}`}>
-                                            <div className={`w-10 h-10 rounded-full flex items-center justify-center ${step >= s.num ? 'bg-indigo-600 text-white' : 'bg-gray-300 text-gray-600'}`}>
-                                                <i className={`fas ${s.icon}`}></i>
-                                            </div>
-                                            <span className="text-xs mt-1 hidden sm:block">{s.label}</span>
+            return (
+                <div className="min-h-screen bg-slate-100 bg-gradient-to-br from-slate-100 via-indigo-50 to-cyan-50 py-8 px-4">
+                    <div className="max-w-6xl mx-auto">
+                        <div className="relative overflow-hidden rounded-[32px] bg-slate-950 text-white shadow-2xl shadow-indigo-200/70 mb-6">
+                            <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,_rgba(34,211,238,0.18),_transparent_32%),radial-gradient(circle_at_left,_rgba(99,102,241,0.28),_transparent_38%)]"></div>
+                            <div className="relative px-6 py-8 md:px-10 md:py-10">
+                                <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
+                                    <div className="max-w-3xl">
+                                        <div className="flex flex-wrap items-center gap-3 mb-4">
+                                            <span className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-sm font-medium text-slate-100 ring-1 ring-white/15">
+                                                <i className="fas fa-sparkles text-cyan-300"></i>
+                                                Curefit location intelligence
+                                            </span>
+                                            <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium ${environmentClasses}`}>
+                                                <span className={`h-2 w-2 rounded-full ${isLocalHost ? 'bg-emerald-500' : 'bg-slate-500'}`}></span>
+                                                {environmentLabel}
+                                            </span>
+                                            {sessionId && (
+                                                <span className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-sm text-slate-200 ring-1 ring-white/10">
+                                                    Session {sessionId}
+                                                </span>
+                                            )}
                                         </div>
-                                        {idx < 5 && (
-                                            <div className={`w-8 h-1 mx-2 ${step > s.num ? 'bg-indigo-600' : 'bg-gray-300'}`}></div>
-                                        )}
+                                        <h1 className="text-4xl md:text-5xl font-black tracking-tight mb-3">
+                                            Retail Brands Scraper for Expansion
+                                        </h1>
+                                        <p className="max-w-2xl text-base md:text-lg text-slate-300 leading-relaxed">
+                                            Scrape, clean, and export brand-location intelligence with a recall-first pipeline built for city-scale retail discovery.
+                                        </p>
                                     </div>
-                                ))}
+                                    <div className="grid grid-cols-2 gap-3 md:min-w-[320px]">
+                                        <div className="rounded-2xl bg-white/10 p-4 ring-1 ring-white/10 backdrop-blur">
+                                            <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Brands loaded</p>
+                                            <p className="mt-2 text-2xl font-bold">{brands.length}</p>
+                                        </div>
+                                        <div className="rounded-2xl bg-white/10 p-4 ring-1 ring-white/10 backdrop-blur">
+                                            <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Selected city</p>
+                                            <p className="mt-2 text-2xl font-bold">{selectedCity || 'Not set'}</p>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
-                        {/* Main Content */}
-                        <div className="bg-white rounded-lg shadow-lg p-8">
+                        <div className="rounded-[28px] bg-white/90 shadow-xl shadow-slate-200/80 ring-1 ring-slate-200 mb-6">
+                            <div className="px-5 py-5 md:px-8">
+                                <div className="grid grid-cols-3 gap-4 md:grid-cols-6">
+                                    {steps.map((s) => {
+                                        const isComplete = step > s.num;
+                                        const isCurrent = step === s.num;
+                                        const tone = isComplete
+                                            ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-200'
+                                            : isCurrent
+                                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200'
+                                                : 'bg-slate-100 text-slate-400';
+
+                                        return (
+                                            <div key={s.num} className="relative flex flex-col items-center text-center">
+                                                <div className={`mb-3 flex h-12 w-12 items-center justify-center rounded-2xl text-base transition-all ${tone}`}>
+                                                    <i className={`fas ${isComplete ? 'fa-check' : s.icon}${isCurrent && s.num === 5 ? ' fa-spin' : ''}`}></i>
+                                                </div>
+                                                <p className={`text-xs md:text-sm font-semibold ${isCurrent ? 'text-slate-900' : isComplete ? 'text-emerald-700' : 'text-slate-400'}`}>
+                                                    {s.label}
+                                                </p>
+                                                <p className="mt-1 text-[11px] uppercase tracking-[0.18em] text-slate-400">
+                                                    0{s.num}
+                                                </p>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="rounded-[30px] bg-white shadow-xl shadow-slate-200/80 ring-1 ring-slate-200 overflow-hidden">
+                            <div className="border-b border-slate-100 px-6 py-5 md:px-8">
+                                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                                    <div>
+                                        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-indigo-500">Workflow</p>
+                                        <h2 className="text-2xl font-bold text-slate-900">
+                                            {steps.find((item) => item.num === step)?.label || 'Workflow'}
+                                        </h2>
+                                    </div>
+                                    <div className="flex flex-wrap gap-2 text-sm">
+                                        <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-600">
+                                            Enhanced cleaner active
+                                        </span>
+                                        <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-600">
+                                            Polling workflow
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="p-6 md:p-8">
                             {/* Step 1: Upload Brands */}
                             {step === 1 && (
                                 <div className="space-y-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800 mb-4">
+                                    <h2 className="text-2xl font-semibold text-slate-900 mb-2">
                                         Step 1: Upload Brands CSV
                                     </h2>
-                                    <p className="text-gray-600 mb-4">
-                                        Upload a CSV file with columns: <code className="bg-gray-100 px-2 py-1 rounded">brand</code>, <code className="bg-gray-100 px-2 py-1 rounded">sku</code>, <code className="bg-gray-100 px-2 py-1 rounded">category</code>
+                                    <p className="text-slate-600 max-w-2xl">
+                                        Start with your brand master file. The scraper expects three columns:
+                                        <code className="mx-1 rounded bg-slate-100 px-2 py-1 text-slate-700">brand</code>,
+                                        <code className="mx-1 rounded bg-slate-100 px-2 py-1 text-slate-700">sku</code>,
+                                        <code className="mx-1 rounded bg-slate-100 px-2 py-1 text-slate-700">category</code>.
                                     </p>
-                                    
-                                    <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-indigo-500 transition-colors">
+
+                                    <div className="grid gap-4 md:grid-cols-[1.7fr_1fr]">
+                                        <div
+                                            onDragEnter={(e) => { e.preventDefault(); setDragActive(true); }}
+                                            onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
+                                            onDragLeave={(e) => { e.preventDefault(); setDragActive(false); }}
+                                            onDrop={handleDrop}
+                                            className={`rounded-[28px] border-2 border-dashed p-10 text-center transition-all ${
+                                                dragActive
+                                                    ? 'border-indigo-500 bg-indigo-50'
+                                                    : 'border-slate-300 bg-slate-50 hover:border-indigo-400 hover:bg-indigo-50/40'
+                                            }`}
+                                        >
                                         <input
                                             ref={fileInputRef}
                                             type="file"
@@ -1370,19 +1315,38 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                                             id="file-upload"
                                         />
                                         <label htmlFor="file-upload" className="cursor-pointer">
-                                            <i className="fas fa-cloud-upload-alt text-5xl text-gray-400 mb-4"></i>
-                                            <p className="text-lg text-gray-600">Click to upload or drag and drop</p>
-                                            <p className="text-sm text-gray-400 mt-2">CSV files only</p>
+                                            <div className="mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-3xl bg-slate-900 text-3xl text-white shadow-lg shadow-slate-300">
+                                                <i className="fas fa-cloud-arrow-up"></i>
+                                            </div>
+                                            <p className="text-xl font-semibold text-slate-900">Drop your CSV here</p>
+                                            <p className="mt-2 text-slate-600">or click to browse from your machine</p>
+                                            <p className="mt-4 text-sm text-slate-400">CSV only. One row per brand-SKU-category combination.</p>
                                         </label>
+                                        </div>
+
+                                        <div className="rounded-[28px] bg-slate-950 p-6 text-white">
+                                            <p className="text-xs uppercase tracking-[0.18em] text-cyan-300">Quick start</p>
+                                            <h3 className="mt-2 text-xl font-bold">Need a template?</h3>
+                                            <p className="mt-2 text-sm leading-6 text-slate-300">
+                                                Download a sample CSV, fill in your brand list, and upload it back here.
+                                            </p>
+                                            <button
+                                                onClick={downloadSampleCsv}
+                                                className="mt-5 inline-flex items-center rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-cyan-100"
+                                            >
+                                                <i className="fas fa-file-arrow-down mr-2"></i>
+                                                Download sample CSV
+                                            </button>
+                                        </div>
                                     </div>
 
                                     {brandsFile && (
-                                        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-                                            <p className="text-green-800 font-medium">
+                                        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                                            <p className="text-emerald-800 font-medium">
                                                 <i className="fas fa-check-circle mr-2"></i>
                                                 {brandsFile.name} uploaded successfully
                                             </p>
-                                            <p className="text-green-600 text-sm mt-1">
+                                            <p className="text-emerald-700 text-sm mt-1">
                                                 {brands.length} brands loaded
                                             </p>
                                         </div>
@@ -1392,7 +1356,7 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                                         <div className="flex justify-end">
                                             <button
                                                 onClick={() => setStep(2)}
-                                                className="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 transition-colors"
+                                                className="rounded-full bg-indigo-600 px-6 py-3 font-semibold text-white transition hover:bg-indigo-700"
                                             >
                                                 Next: Select City <i className="fas fa-arrow-right ml-2"></i>
                                             </button>
@@ -1404,10 +1368,10 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                             {/* Step 2: Select City */}
                             {step === 2 && (
                                 <div className="space-y-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800 mb-4">
+                                    <h2 className="text-2xl font-semibold text-slate-900 mb-2">
                                         Step 2: Select City
                                     </h2>
-                                    <p className="text-gray-600 mb-4">
+                                    <p className="text-slate-600 max-w-2xl">
                                         Choose the Indian city where you want to scrape brand locations
                                     </p>
 
@@ -1417,20 +1381,20 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                                             placeholder="Search for a city..."
                                             value={citySearch}
                                             onChange={(e) => setCitySearch(e.target.value)}
-                                            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3.5 text-slate-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:outline-none"
                                         />
-                                        <i className="fas fa-search absolute right-4 top-4 text-gray-400"></i>
+                                        <i className="fas fa-search absolute right-4 top-4 text-slate-400"></i>
                                     </div>
 
-                                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-96 overflow-y-auto">
+                                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-96 overflow-y-auto rounded-[24px] border border-slate-100 p-2">
                                         {filteredCities.map(city => (
                                             <button
                                                 key={city}
                                                 onClick={() => setSelectedCity(city)}
                                                 className={`p-4 rounded-lg border-2 transition-all ${
                                                     selectedCity === city
-                                                        ? 'border-indigo-600 bg-indigo-50 text-indigo-700'
-                                                        : 'border-gray-200 hover:border-indigo-300'
+                                                        ? 'border-indigo-600 bg-indigo-50 text-indigo-700 shadow-sm'
+                                                        : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'
                                                 }`}
                                             >
                                                 <i className="fas fa-map-marker-alt mr-2"></i>
@@ -1440,8 +1404,8 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                                     </div>
 
                                     {selectedCity && (
-                                        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                                            <p className="text-blue-800 font-medium">
+                                        <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4">
+                                            <p className="text-cyan-900 font-medium">
                                                 <i className="fas fa-info-circle mr-2"></i>
                                                 Selected: {selectedCity}
                                             </p>
@@ -1451,14 +1415,14 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                                     <div className="flex justify-between">
                                         <button
                                             onClick={() => setStep(1)}
-                                            className="bg-gray-200 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-300 transition-colors"
+                                            className="rounded-full bg-slate-200 px-6 py-3 font-semibold text-slate-700 transition hover:bg-slate-300"
                                         >
                                             <i className="fas fa-arrow-left mr-2"></i> Back
                                         </button>
                                         {selectedCity && (
                                             <button
                                                 onClick={() => setStep(3)}
-                                                className="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 transition-colors"
+                                                className="rounded-full bg-indigo-600 px-6 py-3 font-semibold text-white transition hover:bg-indigo-700"
                                             >
                                                 Next: API Key <i className="fas fa-arrow-right ml-2"></i>
                                             </button>
@@ -1470,15 +1434,15 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                             {/* Step 3: API Key */}
                             {step === 3 && (
                                 <div className="space-y-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800 mb-4">
+                                    <h2 className="text-2xl font-semibold text-slate-900 mb-2">
                                         Step 3: Enter Google Maps API Key
                                     </h2>
-                                    <p className="text-gray-600 mb-4">
+                                    <p className="text-slate-600 max-w-2xl">
                                         Enter your Google Maps API key. Make sure the Places API is enabled.
                                     </p>
 
-                                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
-                                        <p className="text-yellow-800 text-sm">
+                                    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                                        <p className="text-amber-900 text-sm">
                                             <i className="fas fa-exclamation-triangle mr-2"></i>
                                             <strong>Required APIs:</strong> Places API (Nearby Search)
                                         </p>
@@ -1489,12 +1453,12 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                                         placeholder="Enter your API key"
                                         value={apiKey}
                                         onChange={(e) => setApiKey(e.target.value)}
-                                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3.5 text-slate-900 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:outline-none"
                                     />
 
                                     {validationError && (
-                                        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-                                            <p className="text-red-800 text-sm">
+                                        <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                                            <p className="text-rose-800 text-sm">
                                                 <i className="fas fa-exclamation-circle mr-2"></i>
                                                 {validationError}
                                             </p>
@@ -1504,14 +1468,14 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                                     <div className="flex justify-between">
                                         <button
                                             onClick={() => setStep(2)}
-                                            className="bg-gray-200 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-300 transition-colors"
+                                            className="rounded-full bg-slate-200 px-6 py-3 font-semibold text-slate-700 transition hover:bg-slate-300"
                                         >
                                             <i className="fas fa-arrow-left mr-2"></i> Back
                                         </button>
                                         {apiKey && (
                                             <button
                                                 onClick={() => setStep(4)}
-                                                className="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 transition-colors"
+                                                className="rounded-full bg-indigo-600 px-6 py-3 font-semibold text-white transition hover:bg-indigo-700"
                                             >
                                                 Next: Review <i className="fas fa-arrow-right ml-2"></i>
                                             </button>
@@ -1523,59 +1487,79 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                             {/* Step 4: Review */}
                             {step === 4 && (
                                 <div className="space-y-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800 mb-4">
+                                    <h2 className="text-2xl font-semibold text-slate-900 mb-2">
                                         Step 4: Review & Start Scraping
                                     </h2>
+                                    <p className="text-slate-600 max-w-3xl">
+                                        This is your final pre-flight check. Review request volume, rough cost range, and expected duration before the background scrape starts.
+                                    </p>
 
-                                    <div className="bg-gray-50 rounded-lg p-6 space-y-4">
-                                        <div className="flex justify-between border-b pb-3">
-                                            <span className="text-gray-600">Brands to scrape:</span>
-                                            <span className="font-semibold">{brands.length}</span>
+                                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                                        <div className="rounded-[26px] border border-slate-200 bg-slate-50 p-5">
+                                            <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Brands to scrape</p>
+                                            <p className="mt-3 text-3xl font-black text-slate-900">{brands.length}</p>
                                         </div>
-                                        <div className="flex justify-between border-b pb-3">
-                                            <span className="text-gray-600">City:</span>
-                                            <span className="font-semibold">{selectedCity}</span>
+                                        <div className="rounded-[26px] border border-slate-200 bg-slate-50 p-5">
+                                            <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Selected city</p>
+                                            <p className="mt-3 text-3xl font-black text-slate-900">{selectedCity}</p>
                                         </div>
-                                        <div className="flex justify-between border-b pb-3">
-                                            <span className="text-gray-600">Estimated Cost:</span>
-                                            <span className="font-semibold text-indigo-600">₹{estimatedCost.toFixed(2)}</span>
+                                        <div className="rounded-[26px] border border-slate-200 bg-slate-50 p-5">
+                                            <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Grid points</p>
+                                            <p className="mt-3 text-3xl font-black text-slate-900">{estimateDetails.gridPoints}</p>
                                         </div>
-                                        <div className="flex justify-between">
-                                            <span className="text-gray-600">Cost Limit:</span>
-                                            <span className="font-semibold">₹20,000</span>
+                                        <div className="rounded-[26px] border border-indigo-200 bg-indigo-50 p-5">
+                                            <p className="text-xs uppercase tracking-[0.18em] text-indigo-400">Estimated requests</p>
+                                            <p className="mt-3 text-3xl font-black text-indigo-700">{estimateDetails.minCalls.toLocaleString()} - {estimateDetails.maxCalls.toLocaleString()}</p>
+                                        </div>
+                                        <div className="rounded-[26px] border border-cyan-200 bg-cyan-50 p-5">
+                                            <p className="text-xs uppercase tracking-[0.18em] text-cyan-500">Approx. total cost</p>
+                                            <p className="mt-3 text-3xl font-black text-cyan-700">₹{estimateDetails.minCost.toFixed(2)} - ₹{estimateDetails.maxCost.toFixed(2)}</p>
+                                        </div>
+                                        <div className="rounded-[26px] border border-amber-200 bg-amber-50 p-5">
+                                            <p className="text-xs uppercase tracking-[0.18em] text-amber-500">Expected duration</p>
+                                            <p className="mt-3 text-3xl font-black text-amber-700">~{expectedDurationMinutes} min</p>
                                         </div>
                                     </div>
 
-                                    {estimatedCost > 20000 && (
-                                        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-                                            <p className="text-red-800 font-medium">
+                                    <div className="rounded-[28px] bg-slate-950 p-6 text-white">
+                                        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                                            <div className="max-w-3xl">
+                                                <p className="text-xs uppercase tracking-[0.18em] text-cyan-300">Run notes</p>
+                                                <h3 className="mt-2 text-xl font-bold">Approximate cost model only</h3>
+                                                <p className="mt-2 text-sm leading-6 text-slate-300">
+                                                    This is the approximate total scrape-cost range based on request volume, not an exact Google bill. The scraper will automatically stop if the live estimate reaches ₹{COST_LIMIT_INR.toLocaleString()}.
+                                                </p>
+                                            </div>
+                                            <div className="rounded-2xl bg-white/10 px-4 py-3 ring-1 ring-white/10">
+                                                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Cost limit</p>
+                                                <p className="mt-2 text-2xl font-bold">₹{COST_LIMIT_INR.toLocaleString()}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {estimateDetails.maxCost > COST_LIMIT_INR && (
+                                        <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                                            <p className="text-rose-800 font-medium">
                                                 <i className="fas fa-exclamation-circle mr-2"></i>
-                                                Warning: Estimated cost exceeds the ₹20,000 limit!
+                                                Warning: the upper-bound request estimate exceeds the ₹{COST_LIMIT_INR.toLocaleString()} limit.
                                             </p>
-                                            <p className="text-red-600 text-sm mt-1">
-                                                Please reduce the number of brands or select a smaller city.
+                                            <p className="text-rose-700 text-sm mt-1">
+                                                Pagination can increase API calls. The scrape may stop early if the live total-cost estimate crosses the limit.
                                             </p>
                                         </div>
                                     )}
 
-                                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                                        <p className="text-blue-800 text-sm">
-                                            <i className="fas fa-info-circle mr-2"></i>
-                                            The scraping will automatically stop if the cost reaches ₹20,000.
-                                        </p>
-                                    </div>
-
                                     <div className="flex justify-between">
                                         <button
                                             onClick={() => setStep(3)}
-                                            className="bg-gray-200 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-300 transition-colors"
+                                            className="rounded-full bg-slate-200 px-6 py-3 font-semibold text-slate-700 transition hover:bg-slate-300"
                                         >
                                             <i className="fas fa-arrow-left mr-2"></i> Back
                                         </button>
                                         <button
                                             onClick={startScraping}
                                             disabled={isValidating || isScraping}
-                                            className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+                                            className="rounded-full bg-emerald-600 px-7 py-3 font-semibold text-white transition hover:bg-emerald-700 disabled:bg-slate-400 disabled:cursor-not-allowed"
                                         >
                                             {isValidating ? (
                                                 <>
@@ -1594,68 +1578,81 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                             {/* Step 5: Scraping Progress */}
                             {step === 5 && (
                                 <div className="space-y-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800 mb-4 text-center">
+                                    <h2 className="text-2xl font-semibold text-slate-900 mb-2 text-center">
                                         Scraping in Progress...
                                     </h2>
+                                    <p className="text-center text-slate-600 max-w-2xl mx-auto">
+                                        The scraper is running in the background and saving results to Supabase. Keep this tab open while polling continues.
+                                    </p>
 
-                                    <div className="flex justify-center mb-6">
-                                        <i className="fas fa-spinner fa-spin text-6xl text-indigo-600"></i>
+                                    <div className="rounded-[30px] bg-slate-950 p-6 text-white">
+                                        <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+                                            <div className="flex items-center gap-5">
+                                                <div className="flex h-20 w-20 items-center justify-center rounded-[28px] bg-white/10 text-3xl text-cyan-300 ring-1 ring-white/10">
+                                                    <i className="fas fa-spinner fa-spin"></i>
+                                                </div>
+                                                <div>
+                                                    <p className="text-xs uppercase tracking-[0.18em] text-cyan-300">Live status</p>
+                                                    <h3 className="mt-2 text-2xl font-bold">{progress.currentBrand || 'Initializing scrape'}</h3>
+                                                    <p className="mt-1 text-sm text-slate-300">{progress.message || 'Preparing background job...'}</p>
+                                                </div>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-3 md:min-w-[340px]">
+                                                <div className="rounded-2xl bg-white/10 p-4 ring-1 ring-white/10">
+                                                    <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Elapsed</p>
+                                                    <p className="mt-2 text-2xl font-bold">{formatDuration(elapsedSeconds)}</p>
+                                                </div>
+                                                <div className="rounded-2xl bg-white/10 p-4 ring-1 ring-white/10">
+                                                    <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Approx. cost</p>
+                                                    <p className="mt-2 text-2xl font-bold">₹{actualCost.toFixed(2)}</p>
+                                                </div>
+                                            </div>
+                                        </div>
                                     </div>
 
-                                    <div className="bg-gray-50 rounded-lg p-6">
-                                        {/* Brand Progress */}
-                                        {progress.currentBrand && (
-                                            <div className="mb-4 pb-4 border-b">
-                                                <div className="flex justify-between text-sm text-gray-600 mb-2">
-                                                    <span className="font-semibold">Current Brand:</span>
-                                                    <span className="text-indigo-600">{progress.currentBrand}</span>
-                                                </div>
-                                                <div className="flex justify-between text-sm text-gray-600">
-                                                    <span>Brand Progress:</span>
-                                                    <span>{progress.brandIndex} of {progress.totalBrands}</span>
-                                                </div>
-                                                {progress.gridPoint && (
-                                                    <div className="flex justify-between text-sm text-gray-600 mt-1">
-                                                        <span>Grid Point:</span>
-                                                        <span>{progress.gridPoint}</span>
-                                                    </div>
-                                                )}
+                                    <div className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
+                                        <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-6">
+                                            <div className="mb-4 flex items-center justify-between text-sm text-slate-600">
+                                                <span>Overall progress</span>
+                                                <span className="font-bold text-indigo-600">{progressPercentage}%</span>
                                             </div>
-                                        )}
-
-                                        {/* Overall Progress */}
-                                        <div className="mb-4">
-                                            <div className="flex justify-between text-sm text-gray-600 mb-2">
-                                                <span>{progress.message}</span>
-                                                <span className="font-bold text-indigo-600">{progress.percentage || 0}%</span>
-                                            </div>
-                                            <div className="w-full bg-gray-200 rounded-full h-4">
+                                            <div className="h-4 w-full overflow-hidden rounded-full bg-slate-200">
                                                 <div
-                                                    className="bg-gradient-to-r from-indigo-500 to-indigo-600 h-4 rounded-full transition-all duration-300 flex items-center justify-center"
-                                                    style={{ width: `${progress.percentage || 0}%` }}
+                                                    className="flex h-4 items-center justify-center rounded-full bg-gradient-to-r from-cyan-500 via-indigo-500 to-indigo-700 text-[10px] font-bold text-white transition-all duration-300"
+                                                    style={{ width: `${progressPercentage}%` }}
                                                 >
-                                                    {progress.percentage > 10 && (
-                                                        <span className="text-xs font-semibold text-white">
-                                                            {progress.percentage}%
-                                                        </span>
-                                                    )}
+                                                    {progressPercentage > 12 ? `${progressPercentage}%` : ''}
                                                 </div>
                                             </div>
-                                            <p className="text-center text-xs text-gray-500 mt-2">
-                                                {progress.current} / {progress.total} operations complete
-                                            </p>
+                                            <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
+                                                <span>{progress.current} / {progress.total} operations complete</span>
+                                                <span>{progress.brandIndex || 0} / {progress.totalBrands || brands.length} brands</span>
+                                            </div>
                                         </div>
 
-                                        <div className="flex justify-between border-t pt-4">
-                                            <span className="text-gray-600">Current Cost:</span>
-                                            <span className="font-semibold text-indigo-600">₹{actualCost.toFixed(2)}</span>
+                                        <div className="rounded-[28px] border border-slate-200 bg-white p-6">
+                                            <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Current run</p>
+                                            <div className="mt-4 space-y-3 text-sm text-slate-600">
+                                                <div className="flex justify-between gap-4">
+                                                    <span>Current brand</span>
+                                                    <span className="font-semibold text-slate-900 text-right">{progress.currentBrand || 'Waiting'}</span>
+                                                </div>
+                                                <div className="flex justify-between gap-4">
+                                                    <span>Brand progress</span>
+                                                    <span className="font-semibold text-slate-900">{progress.brandIndex || 0} / {progress.totalBrands || brands.length}</span>
+                                                </div>
+                                                <div className="flex justify-between gap-4">
+                                                    <span>Status</span>
+                                                    <span className="font-semibold text-slate-900">{progress.message || 'Polling session'}</span>
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
 
-                                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                                        <p className="text-yellow-800 text-sm">
+                                    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                                        <p className="text-amber-900 text-sm">
                                             <i className="fas fa-clock mr-2"></i>
-                                            Please don't close this window. Scraping may take several minutes depending on the number of brands.
+                                            Please do not close this window. Larger city-brand combinations can take several minutes to complete.
                                         </p>
                                     </div>
                                 </div>
@@ -1669,108 +1666,125 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                                 return (
                                     <div className="space-y-6">
                                         <div className="text-center">
-                                            <i className="fas fa-check-circle text-6xl text-green-500 mb-4"></i>
-                                            <h2 className="text-2xl font-semibold text-gray-800 mb-2">
+                                            <i className="fas fa-check-circle text-6xl text-emerald-500 mb-4"></i>
+                                            <h2 className="text-2xl font-semibold text-slate-900 mb-2">
                                                 Scraping Complete!
                                             </h2>
-                                            <p className="text-gray-600">
-                                                Your results are ready to download
+                                            <p className="text-slate-600 max-w-2xl mx-auto">
+                                                Your scrape has finished and the cleaner summary is ready. Choose the export format depending on whether you need final output or row-level audit visibility.
                                             </p>
                                         </div>
 
-                                        {/* Raw Results Summary */}
-                                        <div className="bg-gray-50 rounded-lg p-6 space-y-4">
-                                            <h3 className="font-semibold text-gray-800 mb-3">📊 Raw Results Summary</h3>
-                                            <div className="flex justify-between border-b pb-3">
-                                                <span className="text-gray-600">Total Locations Found:</span>
-                                                <span className="font-semibold text-blue-600">{results.length}</span>
+                                        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                                            <div className="rounded-[26px] border border-slate-200 bg-slate-50 p-5">
+                                                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Raw rows</p>
+                                                <p className="mt-3 text-3xl font-black text-slate-900">{results.length}</p>
                                             </div>
-                                            {results.length === 1000 && (
-                                                <div className="bg-yellow-50 border border-yellow-200 rounded p-3">
-                                                    <p className="text-sm text-yellow-800">
-                                                        <i className="fas fa-info-circle mr-2"></i>
-                                                        <strong>Note:</strong> Display limited to 1,000 rows. Your download will include ALL results from the session.
-                                                    </p>
-                                                </div>
-                                            )}
-                                            <div className="flex justify-between border-b pb-3">
-                                                <span className="text-gray-600">City:</span>
-                                                <span className="font-semibold">{selectedCity}</span>
+                                            <div className="rounded-[26px] border border-emerald-200 bg-emerald-50 p-5">
+                                                <p className="text-xs uppercase tracking-[0.18em] text-emerald-500">Valid rows</p>
+                                                <p className="mt-3 text-3xl font-black text-emerald-700">{cleanedResults.length}</p>
                                             </div>
-                                            <div className="flex justify-between border-b pb-3">
-                                                <span className="text-gray-600">Brands Scraped:</span>
-                                                <span className="font-semibold">{brands.length}</span>
+                                            <div className="rounded-[26px] border border-rose-200 bg-rose-50 p-5">
+                                                <p className="text-xs uppercase tracking-[0.18em] text-rose-500">Removed</p>
+                                                <p className="mt-3 text-3xl font-black text-rose-700">{stats.removed}</p>
                                             </div>
-                                            <div className="flex justify-between">
-                                                <span className="text-gray-600">Total Cost:</span>
-                                                <span className="font-semibold text-indigo-600">₹{actualCost.toFixed(2)}</span>
+                                            <div className="rounded-[26px] border border-cyan-200 bg-cyan-50 p-5">
+                                                <p className="text-xs uppercase tracking-[0.18em] text-cyan-500">Approx. total cost</p>
+                                                <p className="mt-3 text-3xl font-black text-cyan-700">₹{actualCost.toFixed(2)}</p>
                                             </div>
                                         </div>
 
-                                        {/* Cleaned Results Summary */}
-                                        <div className="bg-green-50 border-2 border-green-200 rounded-lg p-6 space-y-4">
-                                            <h3 className="font-semibold text-green-800 mb-3">✨ Clean Results Summary</h3>
-                                            <div className="flex justify-between border-b border-green-200 pb-3">
-                                                <span className="text-green-700">Valid Locations:</span>
-                                                <span className="font-semibold text-green-600 text-lg">{cleanedResults.length}</span>
-                                            </div>
-                                            <div className="flex justify-between border-b border-green-200 pb-3">
-                                                <span className="text-green-700">Removed:</span>
-                                                <span className="font-semibold text-red-600">{stats.removed}</span>
-                                            </div>
-                                            <div className="mt-4 pt-4 border-t border-green-200">
-                                                <p className="text-sm text-green-700 font-semibold mb-2">Removed by reason:</p>
-                                                <div className="grid grid-cols-2 gap-2 text-sm">
-                                                    <div className="flex justify-between">
-                                                        <span className="text-gray-600">Missing data:</span>
-                                                        <span className="font-semibold">{stats.removedByReason.missingData}</span>
+                                        <div className="grid gap-5 xl:grid-cols-[1.15fr_0.85fr]">
+                                            <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-6">
+                                                <div className="flex items-center justify-between gap-3">
+                                                    <div>
+                                                        <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Cleaner summary</p>
+                                                        <h3 className="mt-2 text-xl font-bold text-slate-900">What changed in this export</h3>
                                                     </div>
-                                                    <div className="flex justify-between">
-                                                        <span className="text-gray-600">Not operational:</span>
-                                                        <span className="font-semibold">{stats.removedByReason.notOperational}</span>
+                                                    <span className="inline-flex items-center rounded-full bg-white px-3 py-1 text-sm font-semibold text-slate-700 ring-1 ring-slate-200">
+                                                        Review flagged: {stats.removedByReason.reviewFlagged}
+                                                    </span>
+                                                </div>
+                                                <div className="mt-5 grid gap-3 md:grid-cols-2">
+                                                    <div className="flex justify-between rounded-2xl bg-white px-4 py-3 text-sm">
+                                                        <span className="text-slate-500">Missing data</span>
+                                                        <span className="font-semibold text-slate-900">{stats.removedByReason.missingData}</span>
                                                     </div>
-                                                    <div className="flex justify-between">
-                                                        <span className="text-gray-600">Brand mismatch:</span>
-                                                        <span className="font-semibold">{stats.removedByReason.brandMismatch}</span>
+                                                    <div className="flex justify-between rounded-2xl bg-white px-4 py-3 text-sm">
+                                                        <span className="text-slate-500">Not operational</span>
+                                                        <span className="font-semibold text-slate-900">{stats.removedByReason.notOperational}</span>
                                                     </div>
-                                                    <div className="flex justify-between">
-                                                        <span className="text-gray-600">Invalid pattern:</span>
-                                                        <span className="font-semibold">{stats.removedByReason.invalidPattern}</span>
+                                                    <div className="flex justify-between rounded-2xl bg-white px-4 py-3 text-sm">
+                                                        <span className="text-slate-500">Brand mismatch</span>
+                                                        <span className="font-semibold text-slate-900">{stats.removedByReason.brandMismatch}</span>
                                                     </div>
-                                                    <div className="flex justify-between col-span-2">
-                                                        <span className="text-gray-600">Wrong category:</span>
-                                                        <span className="font-semibold">{stats.removedByReason.wrongCategory}</span>
+                                                    <div className="flex justify-between rounded-2xl bg-white px-4 py-3 text-sm">
+                                                        <span className="text-slate-500">Invalid pattern</span>
+                                                        <span className="font-semibold text-slate-900">{stats.removedByReason.invalidPattern}</span>
+                                                    </div>
+                                                    <div className="flex justify-between rounded-2xl bg-white px-4 py-3 text-sm">
+                                                        <span className="text-slate-500">Wrong category</span>
+                                                        <span className="font-semibold text-slate-900">{stats.removedByReason.wrongCategory}</span>
+                                                    </div>
+                                                    <div className="flex justify-between rounded-2xl bg-white px-4 py-3 text-sm">
+                                                        <span className="text-slate-500">Duplicates</span>
+                                                        <span className="font-semibold text-slate-900">{stats.removedByReason.duplicates}</span>
                                                     </div>
                                                 </div>
-                                            </div>
-                                            <div className="bg-white rounded p-3 mt-4">
-                                                <p className="text-sm text-gray-600">
-                                                    <i className="fas fa-info-circle text-green-600 mr-2"></i>
-                                                    <strong>Clean results include only:</strong> Operational locations with strict brand name matches, valid categories, and no invalid patterns.
+                                                <p className="mt-5 text-sm text-slate-600">
+                                                    <i className="fas fa-info-circle text-emerald-600 mr-2"></i>
+                                                    Clean results keep brand-identity matches after place-type checks, invalid-pattern filtering, and deduplication.
                                                 </p>
                                             </div>
-                                        </div>
 
-                                        {/* Download Options */}
-                                        <div className="flex flex-col space-y-3">
-                                            <button
-                                                onClick={() => downloadResults(true)}
-                                                className="w-full bg-green-600 text-white px-6 py-4 rounded-lg hover:bg-green-700 transition-colors text-lg font-semibold shadow-lg"
-                                            >
-                                                <i className="fas fa-sparkles mr-2"></i> Download Clean Results ({cleanedResults.length} locations)
-                                            </button>
-                                            <button
-                                                onClick={() => downloadResults(false)}
-                                                className="w-full bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors"
-                                            >
-                                                <i className="fas fa-database mr-2"></i> Download Raw Results ({results.length} locations)
-                                            </button>
-                                            <button
-                                                onClick={resetApp}
-                                                className="w-full bg-gray-200 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-300 transition-colors"
-                                            >
-                                                <i className="fas fa-redo mr-2"></i> Start New Scraping
-                                            </button>
+                                            <div className="rounded-[28px] bg-slate-950 p-6 text-white">
+                                                <p className="text-xs uppercase tracking-[0.18em] text-cyan-300">Downloads</p>
+                                                <h3 className="mt-2 text-xl font-bold">Choose your output</h3>
+                                                <div className="mt-5 space-y-3">
+                                                    <button
+                                                        onClick={() => downloadResults('clean')}
+                                                        className="w-full rounded-2xl bg-emerald-500 px-5 py-4 text-left text-white transition hover:bg-emerald-600"
+                                                    >
+                                                        <div className="flex items-start justify-between gap-4">
+                                                            <div>
+                                                                <p className="text-base font-semibold"><i className="fas fa-sparkles mr-2"></i>Clean Results</p>
+                                                                <p className="mt-1 text-sm text-emerald-50">Final valid locations after cleaner logic and deduplication.</p>
+                                                            </div>
+                                                            <span className="rounded-full bg-white/15 px-3 py-1 text-sm font-semibold">{cleanedResults.length}</span>
+                                                        </div>
+                                                    </button>
+                                                    <button
+                                                        onClick={() => downloadResults('raw_with_flags')}
+                                                        className="w-full rounded-2xl bg-indigo-600 px-5 py-4 text-left text-white transition hover:bg-indigo-700"
+                                                    >
+                                                        <div className="flex items-start justify-between gap-4">
+                                                            <div>
+                                                                <p className="text-base font-semibold"><i className="fas fa-tags mr-2"></i>Raw + Cleaner Flags</p>
+                                                                <p className="mt-1 text-sm text-indigo-100">Best for QA, manual review, and mismatch analysis.</p>
+                                                            </div>
+                                                            <span className="rounded-full bg-white/15 px-3 py-1 text-sm font-semibold">{results.length}</span>
+                                                        </div>
+                                                    </button>
+                                                    <button
+                                                        onClick={() => downloadResults('raw')}
+                                                        className="w-full rounded-2xl bg-white/10 px-5 py-4 text-left text-white ring-1 ring-white/10 transition hover:bg-white/15"
+                                                    >
+                                                        <div className="flex items-start justify-between gap-4">
+                                                            <div>
+                                                                <p className="text-base font-semibold"><i className="fas fa-database mr-2"></i>Raw Results</p>
+                                                                <p className="mt-1 text-sm text-slate-300">Original scraped rows without cleaner metadata.</p>
+                                                            </div>
+                                                            <span className="rounded-full bg-white/10 px-3 py-1 text-sm font-semibold">{results.length}</span>
+                                                        </div>
+                                                    </button>
+                                                    <button
+                                                        onClick={resetApp}
+                                                        className="w-full rounded-2xl bg-slate-800 px-5 py-3 text-sm font-semibold text-slate-100 transition hover:bg-slate-700"
+                                                    >
+                                                        <i className="fas fa-redo mr-2"></i> Start New Scraping
+                                                    </button>
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                 );
@@ -1778,11 +1792,12 @@ const filteredCities = Object.keys(INDIAN_CITIES).filter(city =>
                         </div>
 
                         {/* Footer */}
-                        <div className="text-center mt-6 text-gray-600 text-sm">
-                            <p>© 2024 Retail Brands Scraper for Expansion | Powered by Google Maps API</p>
+                        <div className="text-center mt-6 text-slate-500 text-sm">
+                            <p>Built by Curefit Analytics Team</p>
                         </div>
                     </div>
                 </div>
+            </div>
             );
         }
 

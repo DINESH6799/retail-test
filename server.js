@@ -8,6 +8,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const GRID_SPACING_KM = 10;
+const SEARCH_RADIUS_METERS = 5000;
+const APPROX_REQUEST_COST_INR = 17 / 1000;
+const COST_LIMIT_INR = 20000;
+
 // Initialize Supabase
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
@@ -136,23 +141,33 @@ app.post('/api/validate-key', async (req, res) => {
             }
         );
 
-        if (response.data.status === 'REQUEST_DENIED') {
+        const googleStatus = response.data.status;
+        const googleMessage = response.data.error_message;
+
+        if (googleStatus === 'OK' || googleStatus === 'ZERO_RESULTS') {
+            return res.json({ valid: true });
+        }
+
+        if (googleStatus === 'REQUEST_DENIED') {
             return res.status(400).json({
                 valid: false,
-                error: 'API Key invalid or Places API not enabled'
+                error: googleMessage || 'API Key invalid or Places API not enabled'
             });
-        } else if (response.data.status === 'OVER_QUERY_LIMIT') {
+        } else if (googleStatus === 'OVER_QUERY_LIMIT') {
             return res.status(400).json({
                 valid: false,
                 error: 'API Key quota exceeded'
             });
         }
 
-        res.json({ valid: true });
+        return res.status(400).json({
+            valid: false,
+            error: googleMessage || `Google Places validation failed with status: ${googleStatus}`
+        });
     } catch (error) {
         res.status(500).json({
             valid: false,
-            error: 'Failed to validate API key'
+            error: error.response?.data?.error_message || 'Failed to validate API key'
         });
     }
 });
@@ -162,7 +177,7 @@ async function runScrapingInBackground(sessionId, brands, cityBounds, cityCenter
     console.log(`🚀 Starting background scraping for session: ${sessionId}`);
     
     try {
-        const grid = generateGrid(cityBounds, 10, cityCenter[0]); // 10km grid
+        const grid = generateGrid(cityBounds, GRID_SPACING_KM, cityCenter[0]);
         const totalOperations = brands.length * grid.length;
         let currentOperation = 0;
         let totalApiCalls = 0;
@@ -198,14 +213,14 @@ async function runScrapingInBackground(sessionId, brands, cityBounds, cityCenter
                         point.lat,
                         point.lng,
                         brand.brand,
-                        5000,
+                        SEARCH_RADIUS_METERS,
                         apiKey
                     );
 
                     totalApiCalls += apiCalls;
-                    const currentCost = totalApiCalls * (17 / 1000);
+                    const currentCost = totalApiCalls * APPROX_REQUEST_COST_INR;
 
-                    if (currentCost > 20000) {
+                    if (currentCost > COST_LIMIT_INR) {
                         throw new Error('Cost limit exceeded');
                     }
 
@@ -259,11 +274,11 @@ async function runScrapingInBackground(sessionId, brands, cityBounds, cityCenter
 
                 // Update progress every 10 operations
                 if (currentOperation % 10 === 0) {
-                    await supabase
-                        .from('scraping_sessions')
-                        .update({
-                            completed_operations: currentOperation,
-                            total_cost: totalApiCalls * (17 / 1000),
+                        await supabase
+                            .from('scraping_sessions')
+                            .update({
+                                completed_operations: currentOperation,
+                            total_cost: totalApiCalls * APPROX_REQUEST_COST_INR,
                             current_brand: brand.brand,
                             current_brand_index: brandIndex + 1,
                             updated_at: new Date().toISOString()
@@ -285,14 +300,14 @@ async function runScrapingInBackground(sessionId, brands, cityBounds, cityCenter
             }
 
             // Update session after each brand
-            await supabase
-                .from('scraping_sessions')
-                .update({
-                    completed_operations: currentOperation,
-                    total_cost: totalApiCalls * (17 / 1000),
-                    current_brand: brand.brand,
-                    current_brand_index: brandIndex + 1,
-                    updated_at: new Date().toISOString()
+                await supabase
+                    .from('scraping_sessions')
+                    .update({
+                        completed_operations: currentOperation,
+                    total_cost: totalApiCalls * APPROX_REQUEST_COST_INR,
+                        current_brand: brand.brand,
+                        current_brand_index: brandIndex + 1,
+                        updated_at: new Date().toISOString()
                 })
                 .eq('session_id', sessionId);
         }
@@ -310,7 +325,7 @@ async function runScrapingInBackground(sessionId, brands, cityBounds, cityCenter
                 status: 'complete',
                 total_results: count || 0,
                 completed_operations: totalOperations,
-                total_cost: totalApiCalls * (17 / 1000),
+                total_cost: totalApiCalls * APPROX_REQUEST_COST_INR,
                 updated_at: new Date().toISOString()
             })
             .eq('session_id', sessionId);
