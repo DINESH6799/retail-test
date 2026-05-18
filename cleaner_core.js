@@ -34,10 +34,6 @@
         return row.search_brand || row.brand || '';
     }
 
-    function getSearchCategory(row) {
-        return row.search_category || row.category || '';
-    }
-
     const CATEGORY_ALLOWED_TYPES = {
         'Apparel': ['clothing_store', 'shoe_store', 'department_store', 'shopping_mall', 'store'],
         'F&B': ['restaurant', 'cafe', 'meal_takeaway', 'bakery', 'food', 'meal_delivery', 'bar', 'coffee_shop'],
@@ -48,8 +44,137 @@
         'Realty': ['real_estate_agency', 'point_of_interest'],
         'Salons': ['hair_care', 'beauty_salon', 'spa', 'store'],
         'Mobile Stores': ['electronics_store', 'store'],
-        'Opticals': ['health', 'store', 'optician', 'optometrist']
+        'Opticals': ['health', 'store', 'optician', 'optometrist'],
+        'Banking': ['bank', 'atm', 'finance'],
+        'Automobile': ['car_dealer', 'car_repair', 'car_rental', 'store'],
+        'Fitness': ['gym', 'fitness_center', 'sports_activity_location', 'health', 'store']
     };
+
+    const CATEGORY_NORMALIZATION_ALIASES = {
+        'apparel': 'Apparel',
+        'fashion apparel': 'Apparel',
+        'fashion and apparel': 'Apparel',
+        'fashion': 'Apparel',
+        'clothing': 'Apparel',
+        'clothing apparel': 'Apparel',
+        'food and beverage': 'F&B',
+        'food beverage': 'F&B',
+        'f and b': 'F&B',
+        'f b': 'F&B',
+        'restaurant': 'F&B',
+        'restaurants': 'F&B',
+        'cafe': 'F&B',
+        'cafes': 'F&B',
+        'electronics': 'Electronics',
+        'electronic': 'Electronics',
+        'electronic appliances': 'Electronics',
+        'consumer electronics': 'Electronics',
+        'grocery': 'Grocery',
+        'groceries': 'Grocery',
+        'supermarket': 'Grocery',
+        'supermarkets': 'Grocery',
+        'pharmacy': 'Pharmacy',
+        'medical': 'Pharmacy',
+        'chemist': 'Pharmacy',
+        'cinema': 'Cinema',
+        'movie': 'Cinema',
+        'movies': 'Cinema',
+        'real estate': 'Realty',
+        'realty': 'Realty',
+        'property': 'Realty',
+        'salon': 'Salons',
+        'salons': 'Salons',
+        'beauty salon': 'Salons',
+        'hair salon': 'Salons',
+        'mobile': 'Mobile Stores',
+        'mobile store': 'Mobile Stores',
+        'mobile stores': 'Mobile Stores',
+        'phones': 'Mobile Stores',
+        'optical': 'Opticals',
+        'opticals': 'Opticals',
+        'eyewear': 'Opticals',
+        'bank': 'Banking',
+        'banking': 'Banking',
+        'banks financial services': 'Banking',
+        'banking financial services': 'Banking',
+        'financial services': 'Banking',
+        'automobile': 'Automobile',
+        'automobiles': 'Automobile',
+        'auto': 'Automobile',
+        'cars': 'Automobile',
+        'gyms': 'Fitness',
+        'gym': 'Fitness',
+        'fitness': 'Fitness',
+        'fitness center': 'Fitness',
+        'fitness centres': 'Fitness',
+        'fitness centre': 'Fitness',
+        'sports': 'Fitness',
+        'jewelry': 'Apparel',
+        'jewellery': 'Apparel',
+        'variety store': 'Grocery',
+        'branded retail': 'Apparel'
+    };
+
+    const CATEGORY_NORMALIZATION_KEYWORDS = [
+        { keywords: ['fashion', 'apparel'], canonical: 'Apparel' },
+        { keywords: ['clothing'], canonical: 'Apparel' },
+        { keywords: ['food', 'beverage'], canonical: 'F&B' },
+        { keywords: ['restaurant'], canonical: 'F&B' },
+        { keywords: ['cafe'], canonical: 'F&B' },
+        { keywords: ['electronic'], canonical: 'Electronics' },
+        { keywords: ['appliance'], canonical: 'Electronics' },
+        { keywords: ['grocery'], canonical: 'Grocery' },
+        { keywords: ['supermarket'], canonical: 'Grocery' },
+        { keywords: ['pharmacy'], canonical: 'Pharmacy' },
+        { keywords: ['chemist'], canonical: 'Pharmacy' },
+        { keywords: ['medical'], canonical: 'Pharmacy' },
+        { keywords: ['cinema'], canonical: 'Cinema' },
+        { keywords: ['movie'], canonical: 'Cinema' },
+        { keywords: ['realty'], canonical: 'Realty' },
+        { keywords: ['real', 'estate'], canonical: 'Realty' },
+        { keywords: ['property'], canonical: 'Realty' },
+        { keywords: ['salon'], canonical: 'Salons' },
+        { keywords: ['beauty'], canonical: 'Salons' },
+        { keywords: ['hair'], canonical: 'Salons' },
+        { keywords: ['mobile'], canonical: 'Mobile Stores' },
+        { keywords: ['phone'], canonical: 'Mobile Stores' },
+        { keywords: ['optical'], canonical: 'Opticals' },
+        { keywords: ['eyewear'], canonical: 'Opticals' },
+        { keywords: ['bank'], canonical: 'Banking' },
+        { keywords: ['financial'], canonical: 'Banking' },
+        { keywords: ['automobile'], canonical: 'Automobile' },
+        { keywords: ['auto'], canonical: 'Automobile' },
+        { keywords: ['car'], canonical: 'Automobile' },
+        { keywords: ['gym'], canonical: 'Fitness' },
+        { keywords: ['fitness'], canonical: 'Fitness' },
+        { keywords: ['sports'], canonical: 'Fitness' }
+    ];
+
+    function normalizeCategoryValue(category) {
+        const rawCategory = category || '';
+        const normalizedCategory = normalizeText(rawCategory);
+        const normalizedTokens = normalizedCategory ? normalizedCategory.split(' ') : [];
+
+        if (!normalizedCategory) {
+            return '';
+        }
+
+        if (CATEGORY_NORMALIZATION_ALIASES[normalizedCategory]) {
+            return CATEGORY_NORMALIZATION_ALIASES[normalizedCategory];
+        }
+
+        for (const rule of CATEGORY_NORMALIZATION_KEYWORDS) {
+            if (rule.keywords.every(keyword => normalizedTokens.includes(keyword))) {
+                return rule.canonical;
+            }
+        }
+
+        return rawCategory;
+    }
+
+    function getSearchCategory(row) {
+        return normalizeCategoryValue(row.search_category || row.category || '');
+    }
 
     const BRAND_ALIASES = {
         'Westside': ['westside'],
@@ -137,6 +262,33 @@
     };
 
     const REVIEW_TERMS = ['inside', 'near', 'opp', 'opposite', 'beside', 'next to', 'mall', 'plaza'];
+    const BANKING_SERVICE_TERMS = [
+        'atm',
+        'cdm',
+        'cash point',
+        'cash deposit',
+        'cash recycler',
+        'atm cum cdm',
+        'e lobby',
+        'mini branch'
+    ];
+    const BANKING_COMPETITOR_BRANDS = [
+        'Axis Bank',
+        'Bank of Baroda',
+        'Bank of India',
+        'Canara Bank',
+        'Central Bank of India',
+        'Federal Bank',
+        'HDFC Bank',
+        'ICICI Bank',
+        'IDBI Bank',
+        'Indian Bank',
+        'IndusInd Bank',
+        'Punjab National Bank',
+        'South Indian Bank',
+        'State Bank of India',
+        'Union Bank of India'
+    ];
 
     function getBrandConfig(config, brand, fallbackValue) {
         if (config[brand]) {
@@ -159,6 +311,20 @@
 
     function getAllowedTypes(brand, category) {
         return getBrandConfig(BRAND_ALLOWED_TYPES, brand, CATEGORY_ALLOWED_TYPES[category] || []);
+    }
+
+    function hasConflictingBankBrand(nameNormalized, brand) {
+        const normalizedBrand = normalizeText(brand);
+        return BANKING_COMPETITOR_BRANDS.some(candidate => {
+            const normalizedCandidate = normalizeText(candidate);
+            if (!normalizedCandidate || normalizedCandidate === normalizedBrand) {
+                return false;
+            }
+            return (
+                matchesWholePhrase(nameNormalized, normalizedCandidate) &&
+                normalizedCandidate.includes(normalizedBrand)
+            );
+        });
     }
 
     function hasRequiredData(result) {
@@ -312,6 +478,7 @@
         const gmapsCategory = normalizeText(result.gmaps_category);
         const allowedTypes = getAllowedTypes(brand, category).map(normalizeText);
         const brandNegativeTerms = getBrandConfig(BRAND_NEGATIVE_TERMS, brand, []);
+        const isBankingCategory = category === 'Banking';
         const modelProbability = getModelProbability(result);
         const probabilityConfidence = modelProbability !== null && modelProbability >= 0.75 ? 'High' : 'Medium';
 
@@ -348,7 +515,32 @@
             };
         }
 
-        if (GLOBAL_NEGATIVE_TERMS.some(term => nameNormalized.includes(term))) {
+        if (isBankingCategory && BANKING_SERVICE_TERMS.some(term => nameNormalized.includes(term))) {
+            return {
+                cleaned_status: 'Not Valid',
+                cleaner_confidence: 'High',
+                cleaner_reason: 'banking_service_point',
+                review_flag: 'No',
+                model_probability: modelProbability
+            };
+        }
+
+        const isBankBranchLike =
+            isBankingCategory &&
+            (gmapsCategory === 'bank' || gmapsCategory === 'finance') &&
+            !BANKING_SERVICE_TERMS.some(term => nameNormalized.includes(term));
+
+        if (isBankBranchLike && hasConflictingBankBrand(nameNormalized, brand)) {
+            return {
+                cleaned_status: 'Not Valid',
+                cleaner_confidence: 'High',
+                cleaner_reason: 'conflicting_bank_brand',
+                review_flag: 'No',
+                model_probability: modelProbability
+            };
+        }
+
+        if (!isBankBranchLike && GLOBAL_NEGATIVE_TERMS.some(term => nameNormalized.includes(term))) {
             return {
                 cleaned_status: 'Not Valid',
                 cleaner_confidence: 'Medium',
